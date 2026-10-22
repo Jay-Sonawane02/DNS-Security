@@ -233,7 +233,13 @@ std::optional<MacAddr> resolve_resolver_mac(const std::string &iface,
     std::string arping_cmd = "arping -c1 -w1 -I " + iface + " " + resolver_ip + " >/dev/null 2>&1";
     if (std::system(arping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
 
-    std::string cmd = "ip neigh show " + resolver_ip + " dev " + iface +
+    // Deliberately NOT "ip neigh show <ip> dev <iface>": filtering by
+    // device drops the "dev <iface>" tokens from the printed line
+    // (just "<ip> lladdr <mac> <state>", 4 fields), shifting the MAC
+    // from $5 to $3. Matching entrypoint.sh's own unfiltered form
+    // keeps the 5-field layout ("<ip> dev <iface> lladdr <mac>
+    // <state>") that $5 actually expects.
+    std::string cmd = "ip neigh show " + resolver_ip +
                        " 2>/dev/null | awk '{print $5}' | head -n1";
     FILE *fp = popen(cmd.c_str(), "r");
     if (!fp) return std::nullopt;
