@@ -215,14 +215,23 @@ bool forging_is_on() {
 }
 
 // Re-resolve the resolver's current MAC via the kernel's neighbor
-// table, forcing a fresh ARP round-trip first (`ping`) in case the
-// entry is stale/expired rather than just missing. Shells out exactly
-// the way entrypoint.sh's initial priming does -- same technique,
-// just repeated for the life of the process instead of once.
+// table. Plain `ping` alone is not enough to force this: if the
+// kernel's neighbor entry is STALE (pointing at a now-dead MAC after
+// the resolver container was recreated), the NUD state machine tries
+// re-confirming that *same old* MAC via unicast first and can sit on
+// the stale entry for a while before it ever falls back to a fresh
+// broadcast ARP request -- so a single ping's 1s timeout can return
+// before the entry actually updates. `arping` sends a broadcast ARP
+// request directly, bypassing that unicast-reconfirmation step, which
+// is why entrypoint.sh's own initial priming already paired the two;
+// this refresher does the same, just repeated for the life of the
+// process instead of once at startup.
 std::optional<MacAddr> resolve_resolver_mac(const std::string &iface,
                                              const std::string &resolver_ip) {
     std::string ping_cmd = "ping -c1 -W1 " + resolver_ip + " >/dev/null 2>&1";
     if (std::system(ping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
+    std::string arping_cmd = "arping -c1 -w1 -I " + iface + " " + resolver_ip + " >/dev/null 2>&1";
+    if (std::system(arping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
 
     std::string cmd = "ip neigh show " + resolver_ip + " dev " + iface +
                        " 2>/dev/null | awk '{print $5}' | head -n1";
