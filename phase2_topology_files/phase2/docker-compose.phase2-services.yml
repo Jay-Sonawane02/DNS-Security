@@ -1,0 +1,21 @@
+# Merge these two services into phase2/docker-compose.yml under services:
+# Keep all existing Phase 1 networks and services unchanged.
+
+  attacker:
+    build: ./attacker
+    container_name: attacker
+    hostname: attacker
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.100
+
+  rogue-web:
+    build: ./rogue-web
+    container_name: rogue-web
+    hostname: rogue-web
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.30

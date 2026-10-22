@@ -1,0 +1,113 @@
+# CS6008 Assignment 2 — Phase 1: Baseline DNS Hierarchy
+#
+# Three isolated Docker bridge networks, three authoritative nameservers
+# (root -> com -> example.com), one recursive resolver, two routers that
+# are the ONLY path between subnets, one client, one webserver.
+#
+# "internal: true" on every network means Docker creates NO gateway and
+# gives containers NO default route — the only way to reach another
+# subnet is the explicit static route we add in each entrypoint.sh,
+# pointed at the router on that segment. This is what makes the
+# isolation checks in the assignment (direct query to root-ns fails)
+# true by construction, not by accident.
+
+networks:
+  client_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+  resolver_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24
+  auth_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.3.0/24
+
+services:
+
+  # ---------- client subnet ----------
+  client:
+    build: ./client
+    container_name: client
+    hostname: client
+    cap_add: [NET_ADMIN]
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.10
+
+  webserver:
+    build: ./webserver
+    container_name: webserver
+    hostname: webserver
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.20
+
+  edge-router:
+    build: ./router
+    container_name: edge-router
+    hostname: edge-router
+    cap_add: [NET_ADMIN]
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.2
+      resolver_net:
+        ipv4_address: 172.16.2.2
+
+  # ---------- resolver subnet ----------
+  resolver:
+    build: ./resolver
+    container_name: resolver
+    hostname: resolver
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.10
+
+  core-router:
+    build: ./router
+    container_name: core-router
+    hostname: core-router
+    cap_add: [NET_ADMIN]
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.3
+      auth_net:
+        ipv4_address: 172.16.3.3
+
+  # ---------- authoritative subnet ----------
+  root-ns:
+    build: ./root-ns
+    container_name: root-ns
+    hostname: root-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.10
+
+  tld-ns:
+    build: ./tld-ns
+    container_name: tld-ns
+    hostname: tld-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.20
+
+  domain-ns:
+    build: ./domain-ns
+    container_name: domain-ns
+    hostname: domain-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.30

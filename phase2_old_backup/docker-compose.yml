@@ -1,0 +1,142 @@
+# CS6008 Assignment 2 — Phase 2
+# Phase 1 DNS hierarchy + attacker + rogue webserver
+
+networks:
+  client_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+
+  resolver_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24
+
+  auth_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.3.0/24
+
+services:
+
+  # ---------- Client subnet ----------
+
+  client:
+    build: ./client
+    container_name: client
+    hostname: client
+    cap_add:
+      - NET_ADMIN
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.10
+
+  webserver:
+    build: ./webserver
+    container_name: webserver
+    hostname: webserver
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.20
+
+  edge-router:
+    build: ./router
+    container_name: edge-router
+    hostname: edge-router
+    cap_add:
+      - NET_ADMIN
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.2
+      resolver_net:
+        ipv4_address: 172.16.2.2
+
+  # ---------- Resolver subnet ----------
+
+  resolver:
+    build: ./resolver
+    container_name: resolver
+    hostname: resolver
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.10
+
+  core-router:
+    build: ./router
+    container_name: core-router
+    hostname: core-router
+    cap_add:
+      - NET_ADMIN
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.3
+      auth_net:
+        ipv4_address: 172.16.3.3
+
+  # Attacker on the resolver subnet
+  attacker:
+    build: ./attacker
+    container_name: attacker
+    hostname: attacker
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.100
+
+  # ---------- Authoritative DNS subnet ----------
+
+  root-ns:
+    build: ./root-ns
+    container_name: root-ns
+    hostname: root-ns
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.10
+
+  tld-ns:
+    build: ./tld-ns
+    container_name: tld-ns
+    hostname: tld-ns
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.20
+
+  domain-ns:
+    build: ./domain-ns
+    container_name: domain-ns
+    hostname: domain-ns
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.30
+
+  # ---------- Rogue webserver ----------
+
+  rogue-web:
+    build: ./rogue-web
+    container_name: rogue-web
+    hostname: rogue-web
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.30
+

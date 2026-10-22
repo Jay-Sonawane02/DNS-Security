@@ -1,0 +1,15 @@
+$TTL 3600
+@       IN  SOA  root-ns. admin.root-ns. (
+                  2026101401 ; serial
+                  3600       ; refresh
+                  900        ; retry
+                  604800     ; expire
+                  3600 )     ; minimum ttl
+
+@           IN  NS    root-ns.
+root-ns.    IN  A     172.16.3.10
+
+; Delegation to the .com TLD, with glue so the resolver doesn't need a
+; lookup to find the server that would answer the lookup.
+com.        IN  NS    tld-ns.
+tld-ns.     IN  A     172.16.3.20
