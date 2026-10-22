@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY dns_interceptor.cpp /app/dns_interceptor.cpp
-RUN g++ -O2 -std=c++17 -Wall -o /usr/local/bin/dns_interceptor /app/dns_interceptor.cpp -lpcap
+RUN g++ -O2 -std=c++17 -Wall -o /usr/local/bin/dns_interceptor /app/dns_interceptor.cpp -lpcap -lpthread
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

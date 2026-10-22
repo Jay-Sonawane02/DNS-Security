@@ -94,6 +94,14 @@ your "unaffected non-target lookup" evidence.
   above. If it recurs, check `docker exec resolver cat /proc/net/snmp
   | grep '^Udp:'` before/after a query — the 8th column
   (`InCsumErrors`) incrementing confirms it.
+- **Everything times out right after `docker compose restart resolver`,
+  with zero `[forge]` lines in `docker logs attacker`** — the
+  resolver's MAC on `resolver_net` can change on restart/recreate.
+  `dns_interceptor` re-resolves it every 2s in a background thread
+  (not just once at startup) specifically to survive this; if you're
+  on an older build of this file without that refresher, either
+  rebuild (`docker compose build attacker`) or restart `attacker`
+  *after* `resolver` so it re-ARPs against the current MAC.
 
 ## Notes for the report (§2.4)
 - **Why the attack succeeds**: plain DNS has no field authenticating

