@@ -14,25 +14,28 @@ Reuses Phase 6's deployment. Adds:
   `-k`/insecure bypass anywhere).
 - **edge-router's diversion route is unchanged from Phase 6**
   (resolver→client only) — used by attempts (i)/(iii). Attempt (ii)
-  (impersonation) is handled completely differently: the attacker has
-  no interface on `resolver_net` at all, so routing diversion can't
-  work for client→resolver traffic the way it does in the other
-  direction — relaying it onward would mean handing the packet back to
-  the only router the attacker has, which would just re-apply the same
-  diversion rule to it and loop forever. Instead, a **DNAT rule on
-  edge-router** (toggled manually, not a flag file) rewrites the
-  *destination IP* of client→resolver TCP/853 packets to the attacker's
-  own address — the connection then terminates at the attacker as a
-  genuinely new, independent TCP connection. Nothing is relayed, so
-  there's nothing to loop.
+  (impersonation) doesn't touch edge-router at all. True on-path TCP
+  interception for that direction was attempted and abandoned: the
+  attacker has no interface on `resolver_net`, so relaying a
+  client→resolver packet onward means handing it back to the only
+  router the attacker has, which just re-applies its own diversion
+  rule to it and loops forever; a DNAT-based variant of this hit real
+  hairpin-NAT conntrack issues specific to this topology that weren't
+  worth chasing further for what they'd actually prove. Instead,
+  attempt (ii) is tested by pointing the client's connection directly
+  at the attacker's address for one query — see below — while still
+  checking the certificate against the real hostname
+  (`resolver.cs6008.local`), which tests exactly the same
+  certificate-validation property a true redirect would.
 - The attacker gains a **second program**, `tls_endpoint` (OpenSSL +
   plain sockets, not libpcap) — see its own header comment for exactly
   why that one piece of this phase can't be a packet forger the way
   everything else in this assignment is: completing a cryptographically
   valid TLS handshake needs a real TLS stack, not crafted bytes. It
   listens directly on the attacker's own address and always presents
-  the rogue cert — nothing reaches it at all unless the DNAT rule above
-  is active, so there's no separate on/off toggle needed for it.
+  the rogue cert — nothing reaches it at all unless a client is
+  deliberately pointed at it, so there's no separate on/off toggle
+  needed for it.
 - Two client query postures, both just thin wrappers around `kdig`:
   `query-strict.sh` (DoT only, no fallback) and `query-permissive.sh`
   (DoT first, falls back to cleartext `dig` on any failure).
@@ -105,15 +108,18 @@ docker exec attacker rm -f /tmp/tamper.on
 
 ### (ii) Impersonate the resolver with a rogue certificate
 
-Unlike the other two, this one is a DNAT rule on **edge-router**, not
-a flag on the attacker (see the design note above for why):
+Unlike the other two, this one isn't tested by diverting traffic —
+it's tested by pointing the client's connection directly at the
+attacker's address (`172.16.1.100`) for one query, passing it as the
+optional second argument both query scripts accept. `+tls-hostname`
+still checks the cert against the real hostname regardless of which
+address the connection actually goes to, so this tests exactly the
+same certificate-validation property a true on-path redirect would
+(see `tls_endpoint.cpp`'s header comment for why true TCP-level
+interception was attempted and abandoned here):
 ```bash
-docker exec edge-router iptables -t nat -A PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
-  -j DNAT --to-destination 172.16.1.100:853
-docker exec client query-strict.sh example.com       # expect: FAILS (cert doesn't chain to the trusted CA)
-docker exec client query-permissive.sh example.com   # expect: cert rejected same as strict, falls back to cleartext, LANDS
-docker exec edge-router iptables -t nat -D PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
-  -j DNAT --to-destination 172.16.1.100:853
+docker exec client query-strict.sh example.com 172.16.1.100       # expect: FAILS (cert doesn't chain to the trusted CA)
+docker exec client query-permissive.sh example.com 172.16.1.100   # expect: cert rejected same as strict, falls back to cleartext, LANDS
 ```
 Check `docker logs attacker` afterward — `tls_endpoint` logs every
 handshake attempt and whether the client accepted or rejected the
@@ -132,9 +138,6 @@ docker exec attacker rm -f /tmp/deny.on
 
 ```bash
 docker exec attacker rm -f /tmp/forge.on /tmp/tamper.on /tmp/deny.on
-# plus, if attempt (ii) was left on:
-docker exec edge-router iptables -t nat -D PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
-  -j DNAT --to-destination 172.16.1.100:853 2>/dev/null || true
 ```
 
 Capture each attempt the same two-terminal way as every other phase

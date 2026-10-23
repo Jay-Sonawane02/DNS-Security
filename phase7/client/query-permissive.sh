@@ -9,13 +9,22 @@
 # falls back to cleartext, it's exactly as vulnerable as Phase 2/6 all
 # over again, regardless of which TLS-layer trick forced the fallback.
 #
-# Usage: query-permissive.sh [name]
+# The optional second argument overrides WHICH ADDRESS to actually
+# connect to for the DoT attempt (see query-strict.sh's header comment
+# -- used by §7.3 attempt (ii) to target the attacker's address while
+# still checking the cert against the real hostname). The cleartext
+# fallback always goes to the real resolver (172.16.2.10) regardless,
+# since a client falling back to cleartext has no reason to ask the
+# impersonator for it specifically.
+#
+# Usage: query-permissive.sh [name] [server_ip]
 set -u
 NAME="${1:-example.com}"
+SERVER="${2:-172.16.2.10}"
 CA="/etc/ssl/certs/ca-certificates.crt"
 
-echo "[permissive] trying DoT first: kdig +tls @resolver.cs6008.local $NAME"
-if OUT=$(kdig +tls +tls-ca="$CA" @resolver.cs6008.local "$NAME" 2>&1); then
+echo "[permissive] trying DoT first: kdig +tls @$SERVER +tls-hostname=resolver.cs6008.local $NAME"
+if OUT=$(kdig +tls +tls-ca="$CA" +tls-hostname=resolver.cs6008.local @"$SERVER" "$NAME" 2>&1); then
     echo "$OUT"
     echo "[permissive] DoT succeeded -- no fallback needed."
 else

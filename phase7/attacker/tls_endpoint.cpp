@@ -12,29 +12,33 @@
  * only.
  *
  * How traffic reaches it: this program listens directly on the
- * attacker's own address, 172.16.1.100:853. Nothing reaches it unless
- * a DNAT rule on edge-router is manually enabled first (see this
- * phase's README, §7.3 attempt (ii)) -- that rule rewrites the
- * DESTINATION IP of client -> resolver TCP/853 packets to the
- * attacker's own address. That's a deliberate design choice: an
- * earlier draft tried diverting that traffic via routing (the same
- * next-hop technique every other phase uses) and relaying it onward
- * like dns_interceptor.cpp does, but that can't work here -- the
+ * attacker's own address, 172.16.1.100:853. Rather than true on-path
+ * TCP interception (which was tried and abandoned here -- the
  * attacker has no interface on the resolver's subnet at all, so
- * "relaying onward" would mean handing the packet back to the only
- * router it has, which would just re-apply its own diversion rule to
- * it and loop forever. DNAT avoids this entirely: once the
- * destination IP itself is rewritten, the client's connection
- * terminates at the attacker as a genuinely new, independent TCP
- * connection -- nothing is relayed, so there's nothing to loop.
+ * anything resembling "relay client -> resolver traffic onward" means
+ * handing the packet back to the only router the attacker has, which
+ * just re-applies its own diversion rule to it and loops forever; a
+ * DNAT-based variant of this hit real, hard-to-resolve hairpin-NAT
+ * conntrack issues on this exact topology), this attack is tested the
+ * simpler way: the client is pointed DIRECTLY at the attacker's
+ * address for this one query (see this phase's README, §7.3 attempt
+ * (ii), and query-strict.sh/query-permissive.sh's optional server
+ * argument), with +tls-hostname still set to "resolver.cs6008.local"
+ * so the certificate is checked against the real hostname regardless
+ * of which address the connection physically goes to. This tests
+ * EXACTLY the same security property a true on-path redirect would
+ * (does the client's cert validation reject an untrusted CA for the
+ * name it believes it's talking to?) without needing to first solve
+ * TCP-level connection hijacking, which is a separate engineering
+ * problem from what this attempt is actually about.
  *
- * Because nothing reaches this program at all unless that DNAT rule
- * is active, there's no "pass-through / impersonate" mode toggle to
- * get right here (an earlier draft had one): when a connection shows
- * up, it's by definition because someone enabled the attack, so this
- * always presents the rogue certificate. §7.2 Verify and attempts
- * (i)/(iii) never involve this program at all -- their traffic goes
- * directly client <-> resolver, untouched, exactly as normal.
+ * Since nothing reaches this program unless a client is deliberately
+ * pointed at it, there's no "pass-through / impersonate" mode toggle
+ * needed here: whenever a connection shows up, it's by definition
+ * because someone is testing the attack, so this always presents the
+ * rogue certificate. §7.2 Verify and attempts (i)/(iii) never involve
+ * this program at all -- their traffic goes directly client <->
+ * resolver, untouched, exactly as normal.
  *
  * For a client that validates properly (both postures in this phase
  * are required to -- the spec disallows -k/insecure-bypass),
@@ -122,8 +126,8 @@ int main() {
     if (bind(srv, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) { perror("bind"); return 1; }
     if (listen(srv, 16) < 0) { perror("listen"); return 1; }
 
-    fprintf(stderr, "[tls_endpoint] listening on %s:853 -- only reachable once edge-router's DNAT rule for "
-                    "attempt (ii) is manually enabled (see README)\n", listen_ip.c_str());
+    fprintf(stderr, "[tls_endpoint] listening on %s:853 -- reached by pointing a client at this address "
+                    "directly for §7.3 attempt (ii) (see README)\n", listen_ip.c_str());
 
     while (true) {
         sockaddr_in cliaddr{};

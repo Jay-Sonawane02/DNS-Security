@@ -9,12 +9,12 @@
  * in the other direction anyway -- there is no router it could safely
  * hand a client -> resolver packet back to without that router simply
  * re-applying the same diversion rule to the packet THIS program just
- * sent, looping forever. (Earlier draft tried a bidirectional
- * diversion for attempt (ii)'s impersonation; that's handled instead
- * by a real DNAT rule on edge-router -- see tls_endpoint.cpp and this
- * phase's README -- precisely because it avoids this loop: a DNAT'd
- * packet becomes a genuinely new connection terminating at the
- * attacker, not something this program has to relay onward at all.)
+ * sent, looping forever. (Earlier drafts tried a bidirectional
+ * diversion, then a DNAT-based redirect, for attempt (ii)'s
+ * impersonation; both hit real networking dead ends on this topology.
+ * See tls_endpoint.cpp's header comment for how that attempt is
+ * actually tested instead -- it doesn't involve this program or
+ * edge-router at all.)
  *
  * THREE independent toggles (presence-of-file flags, same pattern
  * used everywhere else in this assignment):

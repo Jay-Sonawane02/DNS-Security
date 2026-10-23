@@ -6,17 +6,16 @@
 #   - client reaches the resolver by NAME (resolver.cs6008.local, via
 #     extra_hosts below), never by raw IP, and trusts a private CA
 #     installed in its system trust store (no -k/insecure bypass).
-#   - edge-router's diversion route is otherwise unchanged from Phase 6
-#     (resolver -> client only) -- used by attempts (i)/(iii). Attempt
-#     (ii)'s impersonation uses a SEPARATE, manually-toggled DNAT rule
-#     on edge-router instead (see its entrypoint.sh and this phase's
-#     README): the attacker has no interface on resolver_net at all,
-#     so routing diversion can't work in that direction without
-#     looping; DNAT rewrites the destination IP directly instead,
-#     which needs no relay.
+#   - edge-router's diversion route is unchanged from Phase 6
+#     (resolver -> client only) -- used by attempts (i)/(iii).
 #   - attacker gains a second program, tls_endpoint, for attempt (ii)
-#     specifically (see its own header comment for why that one piece
-#     can't be a libpcap packet forger like everything else here).
+#     (impersonation) specifically -- see its own header comment both
+#     for why that one piece can't be a libpcap packet forger like
+#     everything else here, and for why it's tested by pointing a
+#     client directly at the attacker rather than true on-path TCP
+#     interception (which was tried and hit real hairpin-NAT issues
+#     on this topology -- not worth chasing further for what it would
+#     actually prove).
 #
 # Run BEFORE `docker compose build`:
 #   bash scripts/make-pki.sh
@@ -79,8 +78,7 @@ services:
       FORGE_ENABLED: "0"    # §2/3/6-style forge -- only bites a cleartext fallback
       TAMPER_ENABLED: "0"   # §7.3 (i)
       DENY_ENABLED: "0"     # §7.3 (iii)
-      # Attempt (ii) (impersonation) is controlled on edge-router via
-      # a manually-toggled DNAT rule, not an env var here -- see README.
+      # Attempt (ii) (impersonation) needs no toggle at all -- see README.
     networks:
       client_net:
         ipv4_address: 172.16.1.100
