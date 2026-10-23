@@ -1,0 +1,132 @@
+# CS6008 Assignment 2 — Phase 3: DNSSEC Chain of Trust
+#
+# Identical topology to Phase 2. The ONLY changes from Phase 2:
+#   - root-ns, tld-ns, domain-ns now serve SIGNED zones (produced by
+#     scripts/sign-zones.sh — run that before building).
+#   - resolver has dnssec-validation on and a trust anchor installed.
+#   - attacker is byte-for-byte the same Phase 2 binary.
+# Run scripts/sign-zones.sh BEFORE `docker compose build`, or the
+# authoritative servers will fail to start (named.conf points at
+# *.zone.signed files that won't exist yet).
+
+networks:
+  client_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+  resolver_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24
+  auth_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.3.0/24
+
+services:
+
+  # ---------- client subnet ----------
+  client:
+    build: ./client
+    container_name: client
+    hostname: client
+    cap_add: [NET_ADMIN]
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.10
+
+  webserver:
+    build: ./webserver
+    container_name: webserver
+    hostname: webserver
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.20
+
+  rogue-web:
+    build: ./rogue-web
+    container_name: rogue-web
+    hostname: rogue-web
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.30
+
+  edge-router:
+    build: ./edge-router
+    container_name: edge-router
+    hostname: edge-router
+    cap_add: [NET_ADMIN]
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.2
+      resolver_net:
+        ipv4_address: 172.16.2.2
+
+  # ---------- resolver subnet ----------
+  resolver:
+    build: ./resolver
+    container_name: resolver
+    hostname: resolver
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]  # lets named read its own rndc.key under Docker's default profile
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.10
+
+  attacker:
+    build: ./attacker
+    container_name: attacker
+    hostname: attacker
+    depends_on: [resolver]
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      FORGE_ENABLED: "0"   # starts in verify mode; enable with FORGE_ENABLED=1 or `docker exec attacker touch /tmp/forge.on`
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.100
+
+  core-router:
+    build: ./core-router
+    container_name: core-router
+    hostname: core-router
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]  # lets tcpdump write capture files under Docker's default profile
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.3
+      auth_net:
+        ipv4_address: 172.16.3.3
+
+  # ---------- authoritative subnet (signed) ----------
+  root-ns:
+    build: ./root-ns
+    container_name: root-ns
+    hostname: root-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.10
+
+  tld-ns:
+    build: ./tld-ns
+    container_name: tld-ns
+    hostname: tld-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.20
+
+  domain-ns:
+    build: ./domain-ns
+    container_name: domain-ns
+    hostname: domain-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.30

