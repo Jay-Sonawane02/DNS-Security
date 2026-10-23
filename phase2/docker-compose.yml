@@ -81,7 +81,7 @@ services:
     depends_on: [resolver]
     cap_add: [NET_ADMIN, NET_RAW]
     environment:
-      FORGE_ENABLED: "0"   # starts in verify mode; see README to enable
+      FORGE_ENABLED: "0"   # starts in verify mode per spec §2.2; enable with FORGE_ENABLED=1 or `docker exec attacker touch /tmp/forge.on`
     networks:
       resolver_net:
         ipv4_address: 172.16.2.100
@@ -91,6 +91,7 @@ services:
     container_name: core-router
     hostname: core-router
     cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]  # lets tcpdump write capture files under Docker's default profile
     networks:
       resolver_net:
         ipv4_address: 172.16.2.3
