@@ -1,4 +1,4 @@
-; File written on Fri Oct 23 09:20:41 2026
+; File written on Fri Oct 23 09:40:21 2026
 ; dnssec_signzone version 9.18.39-0ubuntu0.24.04.8-Ubuntu
 com.			3600	IN SOA	tld-ns.com. admin.tld-ns.com. (
 					2026101401 ; serial
@@ -8,67 +8,67 @@ com.			3600	IN SOA	tld-ns.com. admin.tld-ns.com. (
 					3600       ; minimum (1 hour)
 					)
 			3600	RRSIG	SOA 13 1 3600 (
-					20261122082041 20261023082041 48175 com.
-					GnyGZ292p8j1o4CRypXRyQNxhwNPwwsJAMhN
-					0zMHVU4eKL7Lu5SZ2OEDefC8fOO3DZvvYF8y
-					nJgolxOuJDnWXA== )
+					20261122084021 20261023084021 4073 com.
+					E+qo/vdoMWaCwbNlQ6qu6qPxU3lu86iv5njp
+					m3YfzcCVlBWDcr542kLp/lFqHzMTcG3ZFYWd
+					CvKeb9N8L9vFuQ== )
 			3600	NS	tld-ns.com.
 			3600	RRSIG	NS 13 1 3600 (
-					20261122082041 20261023082041 48175 com.
-					wHphG1XmUVb4lG7kzdhu+GAfgZnir6ZkGLfs
-					FW+CN9ThYIjUe3g0Flwi9vSD8A9LcccbbcYh
-					buicH8QNu1/F2w== )
+					20261122084021 20261023084021 4073 com.
+					jOWGtoyb+JYwAuQErQ8gfgGYNLUWj03AAEwi
+					GKqeYB/ubtp9DrloF+/yS60+gEkD87eJ7uDs
+					5ZWdx/0Xgxsf7w== )
 			3600	NSEC	example.com. NS SOA RRSIG NSEC DNSKEY
 			3600	RRSIG	NSEC 13 1 3600 (
-					20261122082041 20261023082041 48175 com.
-					csuBU9FtSzk4eheB2CjZJSZH+Gx3zdjqix/e
-					1QFq0/pPA8lUqJXtCKdmdsbdJw/nRZppv+Ci
-					eqlxJB5+B+Atvg== )
+					20261122084021 20261023084021 4073 com.
+					BtFgPcLTbo5EMp4WNi4QYIKhg+b8Nxbx+nce
+					aZtPY+iAVyXWuLT3/dWoPd0wMQrkpIMnK5fs
+					2msmXPh5l4jAqw== )
 			3600	DNSKEY	256 3 13 (
-					d8h8ypl6LaHLKrh7+zNkpftdvbePGMoB72EJ
-					pXlZ2pCwDKRDg1fD+IDL3ZoFRLeUF7WqkbqP
-					XYoZiXgWzdnJGA==
-					) ; ZSK; alg = ECDSAP256SHA256 ; key id = 48175
+					GqUMmyyFRhdMbU39GAQrZbSU/DpWiwI6vnGB
+					oo/y/ZI8hYzcLcTfK7zK83YXjWdk43Xyh8mJ
+					NhrKHD057SztUg==
+					) ; ZSK; alg = ECDSAP256SHA256 ; key id = 4073
 			3600	DNSKEY	257 3 13 (
-					tFLOZ+kaLJTS1FtHo6cZGzk2lIov9cg9GmJu
-					eM1mhrq4XylZ0O8eVV+SHJOr2y50e3hncEo2
-					xDIbXfegyYhQFw==
-					) ; KSK; alg = ECDSAP256SHA256 ; key id = 28585
+					C0ui+cQG220mdglf1XR/JpfimS/OAct+DnyF
+					APY2Yi5fm02peyEJOMRyCMpPBYMhCcxFaJB1
+					ax5R2A+6fM0Ccw==
+					) ; KSK; alg = ECDSAP256SHA256 ; key id = 35145
 			3600	RRSIG	DNSKEY 13 1 3600 (
-					20261122082041 20261023082041 28585 com.
-					IyoicDHD1/AoaEJvoDnZEsW0qxZ7bXsmOBpW
-					qmBxcj9wtXZnHgFuy7qts2RWAERt8hW0gJsB
-					YJk36bRhV1GZQg== )
+					20261122084021 20261023084021 4073 com.
+					Pu5xtBkGcsDv0KLJMDgAUrEm+WmC+lp9J/tu
+					cRc5lpyjcZBN6xmKBS3amGV6jNijg86lEP/3
+					DPrgb0vjpxyqIw== )
 			3600	RRSIG	DNSKEY 13 1 3600 (
-					20261122082041 20261023082041 48175 com.
-					luzJ/JqSGlgI097dKyEExajH26pUwUhtQ17z
-					NILxVaCr9IAtXNoi7VsF/9VX0OvbtDhT6hWF
-					pFmNkeFweey2JA== )
+					20261122084021 20261023084021 35145 com.
+					T69redWZkcE8/rCSieei6G0KIowtlPIqau0V
+					mf1TdMkg9NbI/OBXmbC6px2w7W5MLQf3Obcv
+					KjxPhfcKxPAD6w== )
 domain-ns.example.com.	3600	IN A	172.16.3.30
-tld-ns.com.		3600	IN A	172.16.3.20
-			3600	RRSIG	A 13 2 3600 (
-					20261122082041 20261023082041 48175 com.
-					2AzS5UAOJRh+cB4V1fOJiM06nj0ybtHgmqWj
-					n5tD7OK12m3Fgr0wDYS1Z/6uel3/BzgZQqSK
-					hzD5Qb/xjA8h7Q== )
-			3600	NSEC	com. A RRSIG NSEC
-			3600	RRSIG	NSEC 13 2 3600 (
-					20261122082041 20261023082041 48175 com.
-					/DMfFs6a/9FhIfyxKWLJiRHQEuU1PiuoXd+5
-					Vknq4eJbRbNTVk6F9WIeGsD3ZEyblia/oz8S
-					W1eOS4/g0sTkHw== )
 example.com.		3600	IN NS	domain-ns.example.com.
-			3600	DS	13938 13 2 (
-					6E9DEF16E013FD629AB4415D68324AFF576E
-					696D040EF30BBEFA5A5AC87B1BD6 )
+			3600	DS	39986 13 2 (
+					1E5AE9DA0C84B61820859D6F58E6BA7130FD
+					1D3A29930FD1C017FDA1072D92E8 )
 			3600	RRSIG	DS 13 2 3600 (
-					20261122082041 20261023082041 48175 com.
-					5wS4iogumYwpaUlCVxgMmuH7t4a5T2zWzKVa
-					xIXwsSoGB31SeTc49XPJLMzg/mWWXzQmJVpr
-					GZX2jzPU393EbA== )
+					20261122084021 20261023084021 4073 com.
+					LrraFtgGV5//xUMRDqKSQyl1v9aNnAKJFlye
+					tuRaUEWzXsYth98AZnBMyCD4Jz1zjBMi/V1H
+					UaE8QUHRSYdIcg== )
 			3600	NSEC	tld-ns.com. NS DS RRSIG NSEC
 			3600	RRSIG	NSEC 13 2 3600 (
-					20261122082041 20261023082041 48175 com.
-					V2N8KEeRRR+9ZfrDIUt5q/z8DPLM4KNjLF9j
-					oa7Ul6WpuUbwRpaIXh6VPORzWN44bc/qENba
-					Dl9tDiiMyG4ITw== )
+					20261122084021 20261023084021 4073 com.
+					icTYYJUSiEQwL9vGp9j55pO0zHlB1IG2yL+S
+					ykzW3taF0tCc+a8T0YxeE53JumNWPi2Q3tZ7
+					Ixf/n7weDKC2MA== )
+tld-ns.com.		3600	IN A	172.16.3.20
+			3600	RRSIG	A 13 2 3600 (
+					20261122084021 20261023084021 4073 com.
+					1gAOkElMB409uo7uF4MMujni9lVeRStO4WkN
+					dq4qaDy1Z0z9vo+o1E27aa3ycH7DJunvInxk
+					eJjyFTO/0dVfjQ== )
+			3600	NSEC	com. A RRSIG NSEC
+			3600	RRSIG	NSEC 13 2 3600 (
+					20261122084021 20261023084021 4073 com.
+					DTbf9ret9qPPG3eV/TI9uY097ZvBTlPLbpmd
+					y7f3f6pzxekLP2B8nw45I/833yaXo7f5/4Jv
+					A5AsnztQ4VGMQg== )
