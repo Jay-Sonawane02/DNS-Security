@@ -1,15 +1,13 @@
-# DNSSEC private keys -- never commit these. The .signed zones and
-# the resolver's trust-anchor.conf (which only contains a PUBLIC
-# DNSKEY, extracted from the root KSK) are committed as required
-# deliverables; the actual key files (.key AND .private -- both
-# regenerated fresh by scripts/sign-zones.sh on every run anyway) are
-# excluded.
+# Everything scripts/sign-zones.sh produces is a regenerated artifact,
+# not a source file -- the assignment's own Git-hygiene rule is
+# explicit about this: "commit sources, configs, and scripts only --
+# not artifacts your scripts regenerate (compiled binaries, SIGNED
+# ZONES, built Docker images, and the like)." The grader re-runs your
+# script from the plain .zone sources to rebuild all of this.
 **/*.private
 **/*.key
-
-# Regenerable signing byproducts -- scripts/sign-zones.sh recreates
-# these from the plain .zone source every time it runs, so keeping
-# them in git would just be noise that goes stale.
+**/*.signed
 **/*.ds
 **/dsset-*
 **/*.zone.signing
+resolver/trust-anchor.conf

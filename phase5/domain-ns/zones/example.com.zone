@@ -1,0 +1,16 @@
+$TTL 3600
+@                      IN  SOA  domain-ns.example.com. admin.example.com. ( 2026101401 3600 900 604800 3600 )
+@                      IN  NS   domain-ns.example.com.
+domain-ns              IN  A    172.16.3.30
+example.com.           IN  A    172.16.1.20
+www.example.com.       IN  A    172.16.1.20
+
+; Five "secret" internal names, never advertised anywhere (not linked
+; from www, not in any NS/MX record pointing to them, not mentioned in
+; any other zone) -- this is the §5.1 requirement. Their existence is
+; only discoverable by walking the NSEC chain.
+backup.example.com.        IN  A  172.16.1.40
+staging.example.com.       IN  A  172.16.1.41
+monitor.example.com.       IN  A  172.16.1.42
+admin-panel.example.com.   IN  A  172.16.1.43
+internal-vpn.example.com.  IN  A  172.16.1.44
