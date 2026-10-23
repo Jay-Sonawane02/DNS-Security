@@ -422,7 +422,22 @@ SectionResult strip_copy_section(const uint8_t *dns_start, int offset, int count
         if (rdata_off + static_cast<int>(rdlen) > dns_len) return {kept, offset, false};
         const int rr_total = nlen + 10 + static_cast<int>(rdlen);
 
-        const bool strip_this = (rtype == DNS_TYPE_RRSIG || rtype == DNS_TYPE_DNSKEY || rtype == DNS_TYPE_DS);
+        // RRSIG's RDATA starts with a 2-byte Type Covered field -- only
+        // strip signatures over A or DS records (the two that matter
+        // for forging example.com's answer and, in Run A, its parent
+        // delegation). Crucially this does NOT strip an RRSIG covering
+        // SOA/NSEC: that's com's own legitimate, validly-signed proof
+        // that no DS exists for example.com (Run B's setup produces
+        // this automatically), and com is itself a securely-validated
+        // zone -- ripping that signature out doesn't make example.com
+        // look unsigned, it makes com's own authoritative response look
+        // tampered, which fails validation for an unrelated reason and
+        // defeats the point of Run B entirely.
+        bool strip_this = (rtype == DNS_TYPE_DNSKEY || rtype == DNS_TYPE_DS);
+        if (rtype == DNS_TYPE_RRSIG && rdlen >= 2) {
+            const uint16_t type_covered = (dns_start[rdata_off] << 8) | dns_start[rdata_off + 1];
+            strip_this = (type_covered == DNS_TYPE_A || type_covered == DNS_TYPE_DS);
+        }
         if (strip_this) {
             fprintf(stderr, "[strip] removed type=%u owner=%s (txid 0x%04x)\n",
                     rtype, qname_lower.c_str(), ntohs(txid));
