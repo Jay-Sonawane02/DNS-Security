@@ -6,10 +6,14 @@
 #   - client reaches the resolver by NAME (resolver.cs6008.local, via
 #     extra_hosts below), never by raw IP, and trusts a private CA
 #     installed in its system trust store (no -k/insecure bypass).
-#   - edge-router now diverts BOTH directions of client<->resolver
-#     traffic through the attacker (Phase 6 only diverted the reply
-#     leg) -- attempt (ii)'s impersonation needs to see the client's
-#     initial connection too.
+#   - edge-router's diversion route is otherwise unchanged from Phase 6
+#     (resolver -> client only) -- used by attempts (i)/(iii). Attempt
+#     (ii)'s impersonation uses a SEPARATE, manually-toggled DNAT rule
+#     on edge-router instead (see its entrypoint.sh and this phase's
+#     README): the attacker has no interface on resolver_net at all,
+#     so routing diversion can't work in that direction without
+#     looping; DNAT rewrites the destination IP directly instead,
+#     which needs no relay.
 #   - attacker gains a second program, tls_endpoint, for attempt (ii)
 #     specifically (see its own header comment for why that one piece
 #     can't be a libpcap packet forger like everything else here).
@@ -72,10 +76,11 @@ services:
     depends_on: [client, resolver]
     cap_add: [NET_ADMIN, NET_RAW]
     environment:
-      FORGE_ENABLED: "0"         # §2/3/6-style forge -- only bites a cleartext fallback
-      TAMPER_ENABLED: "0"        # §7.3 (i)
-      DENY_ENABLED: "0"          # §7.3 (iii)
-      IMPERSONATE_ENABLED: "0"   # §7.3 (ii)
+      FORGE_ENABLED: "0"    # §2/3/6-style forge -- only bites a cleartext fallback
+      TAMPER_ENABLED: "0"   # §7.3 (i)
+      DENY_ENABLED: "0"     # §7.3 (iii)
+      # Attempt (ii) (impersonation) is controlled on edge-router via
+      # a manually-toggled DNAT rule, not an env var here -- see README.
     networks:
       client_net:
         ipv4_address: 172.16.1.100

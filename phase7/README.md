@@ -12,15 +12,27 @@ Reuses Phase 6's deployment. Adds:
   by that name (`extra_hosts` in docker-compose.yml) and trusts the CA
   via its real system trust store (`update-ca-certificates` — no
   `-k`/insecure bypass anywhere).
-- **edge-router now diverts both directions** of client↔resolver
-  traffic through the attacker (Phase 6 only diverted the reply leg)
-  — attempt (ii)'s impersonation needs to see the client's initial
-  connection too, not just the answer.
+- **edge-router's diversion route is unchanged from Phase 6**
+  (resolver→client only) — used by attempts (i)/(iii). Attempt (ii)
+  (impersonation) is handled completely differently: the attacker has
+  no interface on `resolver_net` at all, so routing diversion can't
+  work for client→resolver traffic the way it does in the other
+  direction — relaying it onward would mean handing the packet back to
+  the only router the attacker has, which would just re-apply the same
+  diversion rule to it and loop forever. Instead, a **DNAT rule on
+  edge-router** (toggled manually, not a flag file) rewrites the
+  *destination IP* of client→resolver TCP/853 packets to the attacker's
+  own address — the connection then terminates at the attacker as a
+  genuinely new, independent TCP connection. Nothing is relayed, so
+  there's nothing to loop.
 - The attacker gains a **second program**, `tls_endpoint` (OpenSSL +
   plain sockets, not libpcap) — see its own header comment for exactly
   why that one piece of this phase can't be a packet forger the way
   everything else in this assignment is: completing a cryptographically
-  valid TLS handshake needs a real TLS stack, not crafted bytes.
+  valid TLS handshake needs a real TLS stack, not crafted bytes. It
+  listens directly on the attacker's own address and always presents
+  the rogue cert — nothing reaches it at all unless the DNAT rule above
+  is active, so there's no separate on/off toggle needed for it.
 - Two client query postures, both just thin wrappers around `kdig`:
   `query-strict.sh` (DoT only, no fallback) and `query-permissive.sh`
   (DoT first, falls back to cleartext `dig` on any failure).
@@ -93,11 +105,15 @@ docker exec attacker rm -f /tmp/tamper.on
 
 ### (ii) Impersonate the resolver with a rogue certificate
 
+Unlike the other two, this one is a DNAT rule on **edge-router**, not
+a flag on the attacker (see the design note above for why):
 ```bash
-docker exec attacker touch /tmp/impersonate.on
+docker exec edge-router iptables -t nat -A PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
+  -j DNAT --to-destination 172.16.1.100:853
 docker exec client query-strict.sh example.com       # expect: FAILS (cert doesn't chain to the trusted CA)
 docker exec client query-permissive.sh example.com   # expect: cert rejected same as strict, falls back to cleartext, LANDS
-docker exec attacker rm -f /tmp/impersonate.on
+docker exec edge-router iptables -t nat -D PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
+  -j DNAT --to-destination 172.16.1.100:853
 ```
 Check `docker logs attacker` afterward — `tls_endpoint` logs every
 handshake attempt and whether the client accepted or rejected the
@@ -115,7 +131,10 @@ docker exec attacker rm -f /tmp/deny.on
 ### Switching off
 
 ```bash
-docker exec attacker rm -f /tmp/forge.on /tmp/tamper.on /tmp/impersonate.on /tmp/deny.on
+docker exec attacker rm -f /tmp/forge.on /tmp/tamper.on /tmp/deny.on
+# plus, if attempt (ii) was left on:
+docker exec edge-router iptables -t nat -D PREROUTING -p tcp -d 172.16.2.10 --dport 853 \
+  -j DNAT --to-destination 172.16.1.100:853 2>/dev/null || true
 ```
 
 Capture each attempt the same two-terminal way as every other phase
