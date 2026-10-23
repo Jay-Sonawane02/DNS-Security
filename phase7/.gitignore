@@ -1,0 +1,20 @@
+# Everything scripts/sign-zones.sh produces is a regenerated artifact,
+# not a source file -- the assignment's own Git-hygiene rule is
+# explicit about this: "commit sources, configs, and scripts only --
+# not artifacts your scripts regenerate (compiled binaries, SIGNED
+# ZONES, built Docker images, and the like)." The grader re-runs your
+# script from the plain .zone sources to rebuild all of this.
+**/*.private
+**/*.key
+**/*.signed
+**/*.ds
+**/dsset-*
+**/*.zone.signing
+resolver/trust-anchor.conf
+client/trust-anchor.conf
+
+# Same reasoning for scripts/make-pki.sh's output: the whole PKI
+# (private CA, resolver cert, rogue cert, all their private keys) is
+# regenerated fresh by that script every run -- nothing under pki/ is
+# a source file either.
+**/pki/

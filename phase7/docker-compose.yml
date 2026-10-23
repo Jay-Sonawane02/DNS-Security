@@ -1,0 +1,146 @@
+# CS6008 Assignment 2 — Phase 7: Encrypting the Last Mile (DoT)
+#
+# Reuses Phase 6's deployment. Changes:
+#   - resolver now ALSO listens for DNS-over-TLS on 853 (plain 53 stays
+#     up too -- attempt (iii) needs a resolver that still offers both).
+#   - client reaches the resolver by NAME (resolver.cs6008.local, via
+#     extra_hosts below), never by raw IP, and trusts a private CA
+#     installed in its system trust store (no -k/insecure bypass).
+#   - edge-router now diverts BOTH directions of client<->resolver
+#     traffic through the attacker (Phase 6 only diverted the reply
+#     leg) -- attempt (ii)'s impersonation needs to see the client's
+#     initial connection too.
+#   - attacker gains a second program, tls_endpoint, for attempt (ii)
+#     specifically (see its own header comment for why that one piece
+#     can't be a libpcap packet forger like everything else here).
+#
+# Run BEFORE `docker compose build`:
+#   bash scripts/make-pki.sh
+#   bash scripts/sign-zones.sh
+
+networks:
+  client_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+  resolver_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24
+  auth_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.16.3.0/24
+
+services:
+
+  # ---------- client subnet ----------
+  client:
+    build: ./client
+    container_name: client
+    hostname: client
+    cap_add: [NET_ADMIN]
+    extra_hosts:
+      - "resolver.cs6008.local:172.16.2.10"
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.10
+
+  webserver:
+    build: ./webserver
+    container_name: webserver
+    hostname: webserver
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.20
+
+  rogue-web:
+    build: ./rogue-web
+    container_name: rogue-web
+    hostname: rogue-web
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.30
+
+  attacker:
+    build: ./attacker
+    container_name: attacker
+    hostname: attacker
+    depends_on: [client, resolver]
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      FORGE_ENABLED: "0"         # §2/3/6-style forge -- only bites a cleartext fallback
+      TAMPER_ENABLED: "0"        # §7.3 (i)
+      DENY_ENABLED: "0"          # §7.3 (iii)
+      IMPERSONATE_ENABLED: "0"   # §7.3 (ii)
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.100
+
+  edge-router:
+    build: ./edge-router
+    container_name: edge-router
+    hostname: edge-router
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]  # lets tcpdump write capture files under Docker's default profile
+    networks:
+      client_net:
+        ipv4_address: 172.16.1.2
+      resolver_net:
+        ipv4_address: 172.16.2.2
+
+  # ---------- resolver subnet ----------
+  resolver:
+    build: ./resolver
+    container_name: resolver
+    hostname: resolver
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]  # lets named read its own rndc.key and TLS private key under Docker's default profile
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.10
+
+  core-router:
+    build: ./core-router
+    container_name: core-router
+    hostname: core-router
+    cap_add: [NET_ADMIN]
+    networks:
+      resolver_net:
+        ipv4_address: 172.16.2.3
+      auth_net:
+        ipv4_address: 172.16.3.3
+
+  # ---------- authoritative subnet (signed) ----------
+  root-ns:
+    build: ./root-ns
+    container_name: root-ns
+    hostname: root-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.10
+
+  tld-ns:
+    build: ./tld-ns
+    container_name: tld-ns
+    hostname: tld-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.20
+
+  domain-ns:
+    build: ./domain-ns
+    container_name: domain-ns
+    hostname: domain-ns
+    cap_add: [NET_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    networks:
+      auth_net:
+        ipv4_address: 172.16.3.30
